@@ -1,0 +1,5 @@
+{
+  "name": "Dockday 船舶调度中心",
+  "description": "基于预抵船舶数据的口岸提前布防与边检协同平台，实现船舶风险分层、到港雷达监控与资源协同。",
+  "requestFramePermissions": []
+}
