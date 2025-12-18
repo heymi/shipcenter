@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 
-const db = new Database('shipxy.db');
+const dbPath = process.env.DB_PATH || 'shipxy.db';
+const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma("encoding = 'UTF-8'");
 
