@@ -11,6 +11,8 @@ interface RealtimeEventsPageProps {
   ships: Ship[];
   allShips: Ship[];
   onSelectShip: (ship: Ship) => void;
+  onFollowShip?: (ship: Ship) => void;
+  followedSet?: Set<string>;
   dockdayTargetSet?: Set<string>;
   tab?: 'events' | 'arrivals';
   onTabChange?: (tab: 'events' | 'arrivals') => void;
@@ -20,7 +22,6 @@ interface RealtimeEventsPageProps {
   isShareModeArrivals?: boolean;
 }
 
-type FlagFilter = 'ALL' | 'FOREIGN' | 'CHINA';
 type SeverityLevel = 'high' | 'medium' | 'low';
 
 const EVENT_SEVERITY: Record<string, SeverityLevel> = {
@@ -63,6 +64,8 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   ships,
   allShips,
   onSelectShip,
+  onFollowShip,
+  followedSet,
   dockdayTargetSet,
   tab,
   onTabChange,
@@ -75,7 +78,6 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   const [internalTab, setInternalTab] = useState<'arrivals' | 'events'>(tab ?? 'arrivals');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [flagFilter, setFlagFilter] = useState<FlagFilter>('ALL');
   const [sinceHours, setSinceHours] = useState(12);
   const [eventType, setEventType] = useState('ALL');
   const [page, setPage] = useState(1);
@@ -111,7 +113,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
 
   useEffect(() => {
     setPage(1);
-  }, [flagFilter, eventType, sinceHours]);
+  }, [eventType, sinceHours]);
 
   const shipLookup = useMemo(() => {
     const map = new Map<string, Ship>();
@@ -126,13 +128,10 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
       const key = typeof event.mmsi === 'string' ? event.mmsi : String(event.mmsi);
       const ship = shipLookup.get(key);
       const flag = (event.ship_flag || ship?.flag || '').trim();
-      if (!flag) return flagFilter === 'ALL';
-      const mainland = isMainlandFlag(flag);
-      if (flagFilter === 'FOREIGN') return !mainland;
-      if (flagFilter === 'CHINA') return mainland;
-      return true;
+      if (!flag) return true;
+      return !isMainlandFlag(flag);
     });
-  }, [shipEvents, shipLookup, flagFilter, eventType]);
+  }, [shipEvents, shipLookup, eventType]);
 
   const outdatedThreshold = useMemo(
     () => Date.now() - sinceHours * 3600 * 1000,
@@ -294,6 +293,8 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
             ships={ships}
             allShips={allShips}
             onSelectShip={onSelectShip}
+            onFollowShip={onFollowShip}
+            followedSet={followedSet}
             dataUpdatedAt={arrivalDataUpdatedAt}
             onShare={onShareArrivals}
             shareActive={shareArrivalsActive}

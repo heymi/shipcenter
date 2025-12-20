@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { Ship, RiskLevel, DocStatus } from '../types';
+import { Ship, RiskLevel } from '../types';
 import { AlertOctagon, AlertTriangle, ShieldCheck, Search, Filter, Map, History, X } from 'lucide-react';
+import { ShipDetailModal } from './ShipDetailModal';
 
 interface RiskAssessmentProps {
   ships: Ship[];
@@ -22,31 +23,6 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ ships }) => {
     }
     return new Date(a.eta).getTime() - new Date(b.eta).getTime();
   });
-
-  const getRiskLabel = (level: RiskLevel) => {
-    switch (level) {
-      case RiskLevel.HIGH:
-        return '重点';
-      case RiskLevel.ATTENTION:
-        return '提醒';
-      default:
-        return '普通';
-    }
-  };
-
-  const getDocStatusLabel = (status: DocStatus) => {
-    switch (status) {
-      case DocStatus.APPROVED:
-        return '预审通过';
-      case DocStatus.REVIEWING:
-        return '审核中';
-      case DocStatus.MISSING_INFO:
-        return '补材中';
-      case DocStatus.PENDING:
-      default:
-        return '待提交';
-    }
-  };
 
   const getRiskBadge = (level: RiskLevel) => {
     switch (level) {
@@ -96,23 +72,6 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ ships }) => {
         port: idx === 0 ? activeShip.lastPort : '长江航道',
       };
     });
-  }, [activeShip, panelMode]);
-
-  const detailFields = useMemo(() => {
-    if (!activeShip || panelMode !== 'detail') return [];
-    return [
-      { label: '船名', value: activeShip.name },
-      { label: 'MMSI', value: activeShip.mmsi },
-      { label: '船籍', value: activeShip.flag },
-      { label: '类型', value: activeShip.type },
-      { label: 'ETA', value: new Date(activeShip.eta).toLocaleString() },
-      { label: 'ETD', value: new Date(activeShip.etd).toLocaleString() },
-      { label: '上一港', value: activeShip.lastPort },
-      { label: '代理', value: activeShip.agent },
-      { label: '风险等级', value: getRiskLabel(activeShip.riskLevel) },
-      { label: '风险说明', value: activeShip.riskReason || '无' },
-      { label: '材料状态', value: getDocStatusLabel(activeShip.docStatus) },
-    ];
   }, [activeShip, panelMode]);
 
   return (
@@ -210,7 +169,7 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ ships }) => {
         )}
       </div>
 
-      {activeShip && panelMode && (
+      {activeShip && panelMode === 'track' && (
         <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/30 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl border border-slate-200">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
@@ -258,16 +217,6 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ ships }) => {
                 </div>
               )}
 
-              {panelMode === 'detail' && (
-                <div className="space-y-3">
-                  {detailFields.map(field => (
-                    <div key={field.label} className="flex justify-between text-sm border-b border-slate-100 pb-2">
-                      <span className="text-slate-500">{field.label}</span>
-                      <span className="text-slate-800 font-medium text-right">{field.value}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
             <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
               <button 
@@ -276,14 +225,12 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ ships }) => {
               >
                 关闭
               </button>
-              {panelMode === 'detail' && (
-                <button className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg shadow-sm hover:bg-blue-700">
-                  推送提醒
-                </button>
-              )}
             </div>
           </div>
         </div>
+      )}
+      {activeShip && panelMode === 'detail' && (
+        <ShipDetailModal ship={activeShip} onClose={closePanel} />
       )}
     </div>
   );

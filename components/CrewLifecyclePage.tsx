@@ -4,6 +4,7 @@ import { Ship } from '../types';
 import { isMainlandFlag } from '../utils/ship';
 import { getRiskBadgeClass, getRiskLabel } from '../utils/risk';
 import { formatSmartWeekdayLabel } from '../utils/date';
+import { ShipDetailModal } from './ShipDetailModal';
 
 interface CrewLifecyclePageProps {
   ships: Ship[];
@@ -127,6 +128,7 @@ export const CrewLifecyclePage: React.FC<CrewLifecyclePageProps> = ({ ships, all
   const [selectedShipId, setSelectedShipId] = useState<string | null>(null);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [selectedPermitId, setSelectedPermitId] = useState<string | null>(null);
+  const [detailShip, setDetailShip] = useState<Ship | null>(null);
   const fleet = BASE_VEHICLES;
 
   const arrivalShips = useMemo(() => {
@@ -381,14 +383,24 @@ export const CrewLifecyclePage: React.FC<CrewLifecyclePageProps> = ({ ships, all
             进港详情
           </div>
           {selectedShip ? (
-            <div className="text-sm text-slate-300 space-y-1">
-              <p className="text-white font-semibold">
-                {selectedShip.name}
-                {selectedShip.cnName && <span className="text-xs text-slate-400 ml-2">{selectedShip.cnName}</span>}
-              </p>
-              <p>船籍 {selectedShip.flag || '-'}</p>
-              <p>ETA {selectedShip.eta?.replace('T', ' ') || '-'}</p>
-              <p>上一港 {selectedShip.lastPort || '-'}</p>
+            <div className="text-sm text-slate-300 space-y-2">
+              <div>
+                <p className="text-white font-semibold">
+                  {selectedShip.name}
+                  {selectedShip.cnName && (
+                    <span className="text-xs text-slate-400 ml-2">{selectedShip.cnName}</span>
+                  )}
+                </p>
+                <p>船籍 {selectedShip.flag || '-'}</p>
+                <p>ETA {selectedShip.eta?.replace('T', ' ') || '-'}</p>
+                <p>上一港 {selectedShip.lastPort || '-'}</p>
+              </div>
+              <button
+                onClick={() => setDetailShip(selectedShip)}
+                className="inline-flex items-center justify-center px-3 py-1.5 rounded-full border border-emerald-400/60 text-xs text-emerald-100 hover:bg-emerald-500/10 transition"
+              >
+                查看统一详情
+              </button>
             </div>
           ) : (
             <p className="text-xs text-slate-500">点击左侧进港动态查看详情</p>
@@ -430,6 +442,7 @@ export const CrewLifecyclePage: React.FC<CrewLifecyclePageProps> = ({ ships, all
           )}
         </div>
       </div>
+      <ShipDetailModal ship={detailShip} onClose={() => setDetailShip(null)} />
     </div>
   );
 };

@@ -1,4 +1,5 @@
 import { API_CONFIG } from './config';
+import { supabase } from './supabaseClient';
 import { ShipxyResponse, ShipxyShip, ShipEvent } from './types';
 
 // Helper to generate realistic mock data matching Shipxy structure
@@ -268,11 +269,21 @@ export type FollowedShipMeta = {
   mmsi: string;
   berth?: string | null;
   agent?: string | null;
+  material_status?: string | null;
+  arrival_remark?: string | null;
+  expected_berth?: string | null;
+  arrival_window?: string | null;
+  risk_note?: string | null;
+  cargo_type?: string | null;
+  crew_nationality?: string | null;
+  crew_nationality_distribution?: string | null;
   agent_contact_name?: string | null;
   agent_contact_phone?: string | null;
   remark?: string | null;
   updated_at?: number;
   is_target?: boolean;
+  status?: string | null;
+  owner?: string | null;
   crew_income_level?: string | null;
   disembark_intent?: string | null;
   email_status?: string | null;
@@ -280,6 +291,8 @@ export type FollowedShipMeta = {
   expected_disembark_count?: number | null;
   actual_disembark_count?: number | null;
   disembark_date?: string | null;
+  last_followed_at?: number | null;
+  next_followup_at?: number | null;
 };
 
 const getLocalBase = () => {
@@ -288,11 +301,25 @@ const getLocalBase = () => {
   return base.endsWith('/') ? base.slice(0, -1) : base;
 };
 
+const getAuthHeaders = async () => {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch (err) {
+    console.warn('Failed to resolve auth token', err);
+    return {};
+  }
+};
+
 export const fetchFollowedShips = async (): Promise<FollowedShipMeta[]> => {
   try {
     const base = getLocalBase();
     if (!base) throw new Error('Local API not configured');
-    const resp = await fetch(`${base}/followed-ships`, { headers: { Accept: 'application/json' } });
+    const authHeaders = await getAuthHeaders();
+    const resp = await fetch(`${base}/followed-ships`, {
+      headers: { Accept: 'application/json', ...authHeaders },
+    });
     if (!resp.ok) throw new Error(`followed-ships error ${resp.status}`);
     const payload = await resp.json();
     return Array.isArray(payload) ? payload : [];
@@ -302,12 +329,29 @@ export const fetchFollowedShips = async (): Promise<FollowedShipMeta[]> => {
   }
 };
 
+export const fetchSharedFollowedShips = async (shareToken: string): Promise<FollowedShipMeta[]> => {
+  try {
+    const base = getLocalBase();
+    if (!base) throw new Error('Local API not configured');
+    const resp = await fetch(`${base}/share-links/${encodeURIComponent(shareToken)}/followed-ships`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!resp.ok) throw new Error(`share-followed-ships error ${resp.status}`);
+    const payload = await resp.json();
+    return Array.isArray(payload) ? payload : [];
+  } catch (err) {
+    console.warn('Failed to load shared followed ships', err);
+    return [];
+  }
+};
+
 export const upsertFollowedShip = async (meta: FollowedShipMeta) => {
   const base = getLocalBase();
   if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
   const resp = await fetch(`${base}/followed-ships`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify(meta),
   });
   if (!resp.ok) throw new Error(`followed-ships save error ${resp.status}`);
@@ -317,9 +361,284 @@ export const upsertFollowedShip = async (meta: FollowedShipMeta) => {
 export const deleteFollowedShip = async (mmsi: string) => {
   const base = getLocalBase();
   if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
   const resp = await fetch(`${base}/followed-ships/${encodeURIComponent(mmsi)}`, {
     method: 'DELETE',
+    headers: authHeaders,
   });
   if (!resp.ok) throw new Error(`followed-ships delete error ${resp.status}`);
   return resp.json();
+};
+
+export type FollowedShipFollowup = {
+  id?: number;
+  mmsi: string;
+  status?: string | null;
+  note?: string | null;
+  next_action?: string | null;
+  next_action_at?: number | null;
+  operator?: string | null;
+  created_at?: number;
+};
+
+export const fetchFollowups = async (mmsi: string, limit = 50): Promise<FollowedShipFollowup[]> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const url = new URL(`${base}/followed-ships/${encodeURIComponent(mmsi)}/followups`);
+  url.searchParams.set('limit', String(limit));
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(url.toString(), { headers: { Accept: 'application/json', ...authHeaders } });
+  if (!resp.ok) throw new Error(`followups error ${resp.status}`);
+  const payload = await resp.json();
+  return Array.isArray(payload) ? payload : [];
+};
+
+export const createFollowup = async (mmsi: string, payload: FollowedShipFollowup) => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/followed-ships/${encodeURIComponent(mmsi)}/followups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(`followups create error ${resp.status}`);
+  return resp.json();
+};
+
+export const updateFollowedShipStatus = async (
+  mmsi: string,
+  payload: { status?: string | null; owner?: string | null; next_followup_at?: number | null }
+) => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/followed-ships/${encodeURIComponent(mmsi)}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(`followed-ships status error ${resp.status}`);
+  return resp.json();
+};
+
+export type ShipAggregate = {
+  day?: string;
+  week_start?: string;
+  arrival_event_count?: number;
+  arrival_ship_count?: number;
+  risk_change_count?: number;
+  risk_change_ship_count?: number;
+  updated_at?: number;
+};
+
+export type ShipAiInference = {
+  cargo_type_guess?: {
+    value?: string;
+    confidence?: 'low' | 'medium' | 'high';
+    confidence_pct?: number;
+    rationale?: string[];
+  };
+  berth_guess?: {
+    value?: string;
+    confidence?: 'low' | 'medium' | 'high';
+    confidence_pct?: number;
+    rationale?: string[];
+  };
+  agent_guess?: {
+    value?: string;
+    confidence?: 'low' | 'medium' | 'high';
+    confidence_pct?: number;
+    rationale?: string[];
+  };
+  crew_nationality_guess?: {
+    value?: string;
+    confidence?: 'low' | 'medium' | 'high';
+    confidence_pct?: number;
+    rationale?: string[];
+  };
+  crew_count_guess?: {
+    value?: number | null;
+    confidence?: 'low' | 'medium' | 'high';
+    confidence_pct?: number;
+    rationale?: string[];
+  };
+  signals?: string[];
+  sources_used?: string[];
+  disclaimer?: string;
+  raw?: string;
+  parse_error?: string;
+  citations?: {
+    source?: string;
+    url?: string;
+    title?: string;
+    snippet?: string;
+  }[];
+};
+
+export const analyzeShipWithAI = async (payload: {
+  ship: {
+    name?: string;
+    mmsi?: string | number;
+    imo?: string | number;
+    flag?: string;
+    type?: string;
+    eta?: string;
+    etd?: string;
+    etaUtc?: number;
+    lastTime?: string;
+    lastTimeUtc?: number;
+    dest?: string;
+    last_port?: string;
+    lastPort?: string;
+    dwt?: number;
+    length?: number;
+    width?: number;
+    draught?: number;
+    agent?: string;
+    docStatus?: string;
+    riskReason?: string;
+  };
+  events?: { event_type?: string; detail?: string; detected_at?: number }[];
+  source_notes?: string;
+  source_links?: string[];
+}): Promise<ShipAiInference> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/ai/ship-analysis`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    let msg = `ai analysis error ${resp.status}`;
+    try {
+      const errPayload = await resp.json();
+      if (errPayload?.msg) {
+        msg = String(errPayload.msg);
+      }
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(msg);
+  }
+  const data = await resp.json();
+  return data?.data || {};
+};
+
+export const autoAnalyzeShipWithAI = async (payload: {
+  ship: {
+    name?: string;
+    mmsi?: string | number;
+    imo?: string | number;
+    flag?: string;
+    type?: string;
+    eta?: string;
+    etd?: string;
+    etaUtc?: number;
+    lastTime?: string;
+    lastTimeUtc?: number;
+    dest?: string;
+    last_port?: string;
+    lastPort?: string;
+    dwt?: number;
+    length?: number;
+    width?: number;
+    draught?: number;
+    agent?: string;
+    docStatus?: string;
+    riskReason?: string;
+  };
+  events?: { event_type?: string; detail?: string; detected_at?: number }[];
+  max_sources?: number;
+  max_per_source?: number;
+}): Promise<ShipAiInference> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/ai/ship-analysis/auto`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    let msg = `ai auto analysis error ${resp.status}`;
+    try {
+      const errPayload = await resp.json();
+      if (errPayload?.msg) {
+        msg = String(errPayload.msg);
+      }
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(msg);
+  }
+  const data = await resp.json();
+  return data?.data || {};
+};
+
+export const fetchShipAiAnalysis = async (mmsi: string): Promise<{
+  data: ShipAiInference | null;
+  updated_at?: number | null;
+  created_at?: number | null;
+}> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/ai/ship-analysis/${encodeURIComponent(mmsi)}`, {
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+  });
+  if (!resp.ok) throw new Error(`ai analysis fetch error ${resp.status}`);
+  const payload = await resp.json();
+  return {
+    data: payload?.data || null,
+    updated_at: payload?.updated_at ?? null,
+    created_at: payload?.created_at ?? null,
+  };
+};
+
+export const saveShipAiAnalysis = async (mmsi: string, analysis: ShipAiInference) => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/ai/ship-analysis/${encodeURIComponent(mmsi)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify({ analysis }),
+  });
+  if (!resp.ok) {
+    let msg = `ai analysis save error ${resp.status}`;
+    try {
+      const errPayload = await resp.json();
+      if (errPayload?.msg) msg = String(errPayload.msg);
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(msg);
+  }
+};
+
+export const fetchDailyAggregates = async (start?: string, end?: string): Promise<ShipAggregate[]> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const url = new URL(`${base}/stats/daily`);
+  if (start) url.searchParams.set('start', start);
+  if (end) url.searchParams.set('end', end);
+  const resp = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  if (!resp.ok) throw new Error(`stats daily error ${resp.status}`);
+  const payload = await resp.json();
+  return Array.isArray(payload) ? payload : [];
+};
+
+export const fetchWeeklyAggregates = async (start?: string, end?: string): Promise<ShipAggregate[]> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const url = new URL(`${base}/stats/weekly`);
+  if (start) url.searchParams.set('start', start);
+  if (end) url.searchParams.set('end', end);
+  const resp = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  if (!resp.ok) throw new Error(`stats weekly error ${resp.status}`);
+  const payload = await resp.json();
+  return Array.isArray(payload) ? payload : [];
 };

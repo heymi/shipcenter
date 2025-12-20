@@ -179,15 +179,12 @@ type ShipTypeFilter =
   | 'UNKNOWN';
 
 const TIME_RANGE_OPTIONS: TimeRangeOption[] = ['TODAY', '24', '48', '72', '168'];
-const FLAG_OPTIONS = ['ALL', 'FOREIGN', 'CHINA'] as const;
 const RISK_OPTIONS = ['ALL', 'HIGH', 'ATTENTION', 'NORMAL'] as const;
 const DRAUGHT_OPTIONS = ['ALL', 'SHALLOW', 'MEDIUM', 'DEEP'] as const;
 const SHIP_TYPE_OPTIONS: ShipTypeFilter[] = ['ALL', 'CARGO', 'TANKER', 'PASSENGER', 'SPECIAL', 'FISHING', 'UNKNOWN'];
 
 const isTimeRangeOption = (value: any): value is TimeRangeOption =>
   typeof value === 'string' && TIME_RANGE_OPTIONS.includes(value as TimeRangeOption);
-const isFlagFilterOption = (value: any): value is (typeof FLAG_OPTIONS)[number] =>
-  typeof value === 'string' && FLAG_OPTIONS.includes(value as (typeof FLAG_OPTIONS)[number]);
 const isRiskFilterOption = (value: any): value is (typeof RISK_OPTIONS)[number] =>
   typeof value === 'string' && RISK_OPTIONS.includes(value as (typeof RISK_OPTIONS)[number]);
 const isDraughtFilterOption = (value: any): value is (typeof DRAUGHT_OPTIONS)[number] =>
@@ -212,7 +209,6 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   // Filter State
-  const [flagFilter, setFlagFilter] = useState<'ALL' | 'FOREIGN' | 'CHINA'>('FOREIGN'); 
   const [shipTypeFilter, setShipTypeFilter] = useState<ShipTypeFilter>('CARGO'); // Changed default to CARGO as it maps to 70-79
   const [riskFilter, setRiskFilter] = useState<'ALL' | 'HIGH' | 'ATTENTION' | 'NORMAL'>('ALL');
   const [draughtFilter, setDraughtFilter] = useState<'ALL' | 'SHALLOW' | 'MEDIUM' | 'DEEP'>('ALL');
@@ -230,7 +226,6 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
       const parsed = JSON.parse(cached);
       if (parsed.portCode) setPortCode(parsed.portCode);
       if (isTimeRangeOption(parsed.timeRange)) setTimeRange(parsed.timeRange);
-      if (isFlagFilterOption(parsed.flagFilter)) setFlagFilter(parsed.flagFilter);
       if (isShipTypeFilterOption(parsed.shipTypeFilter)) setShipTypeFilter(parsed.shipTypeFilter);
       if (isRiskFilterOption(parsed.riskFilter)) setRiskFilter(parsed.riskFilter);
       if (isDraughtFilterOption(parsed.draughtFilter)) setDraughtFilter(parsed.draughtFilter);
@@ -251,12 +246,7 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
       return Number.isNaN(parsed) ? 0 : parsed;
     };
 
-    // Filter by Flag
-    if (flagFilter === 'FOREIGN') {
-        result = result.filter(ship => !isMainlandFlag(ship.ship_flag));
-    } else if (flagFilter === 'CHINA') {
-        result = result.filter(ship => isMainlandFlag(ship.ship_flag));
-    }
+    result = result.filter((ship) => !isMainlandFlag(ship.ship_flag));
 
     // Filter by Type
     if (shipTypeFilter === 'CARGO') {
@@ -332,7 +322,7 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
     result = [...result].sort((a, b) => getEtaTime(a) - getEtaTime(b));
 
     setData(result);
-  }, [rawData, flagFilter, shipTypeFilter, riskFilter, draughtFilter, searchQuery]);
+  }, [rawData, shipTypeFilter, riskFilter, draughtFilter, searchQuery]);
 
   const handleFetch = async () => {
     setLoading(true);
@@ -360,7 +350,6 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
               const cachePayload = {
                 portCode: targetPort,
                 timeRange,
-                flagFilter,
                 shipTypeFilter,
                 riskFilter,
                 draughtFilter,
@@ -426,18 +415,6 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
             </select>
         </div>
 
-        <div>
-            <label className={labelClass}>船籍筛选</label>
-            <select 
-                value={flagFilter}
-                onChange={e => setFlagFilter(e.target.value as 'ALL' | 'FOREIGN' | 'CHINA')}
-                className={selectClass}
-            >
-                <option value="ALL">全部船籍</option>
-                <option value="FOREIGN">仅外籍 (含港澳台)</option>
-                <option value="CHINA">仅中国大陆</option>
-            </select>
-        </div>
 
         <div>
             <label className={labelClass}>船型筛选</label>

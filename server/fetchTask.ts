@@ -1,6 +1,15 @@
+import './env';
 import axios from 'axios';
 import cron from 'node-cron';
-import db from './db';
+import {
+  getLatestSnapshot,
+  getLastEventTimestamp,
+  getShipEventsInRange,
+  saveEvents,
+  saveSnapshot,
+  upsertDailyAggregate,
+  upsertWeeklyAggregate,
+} from './db';
 import { evaluateRiskRules, getRiskLabel, RISK_RULE_CONFIG } from '../utils/risk';
 import { isMainlandFlag } from '../utils/ship';
 import { ShipxyShip } from '../types';
@@ -37,34 +46,25 @@ const ARRIVAL_THRESHOLDS = [
 ] as const;
 
 type Ship = ShipxyShip & Record<string, any>;
-const getLastEventTimestamp = (() => {
-  const stmt = db.prepare(
-    'SELECT detected_at FROM ship_events WHERE mmsi = ? AND event_type = ? ORDER BY detected_at DESC LIMIT 1'
-  );
-  return (mmsi: string | number, eventType: string): number | null => {
-    const row = stmt.get(String(mmsi), eventType) as { detected_at?: number } | undefined;
-    return row?.detected_at ?? null;
-  };
-})();
-
 const fetchShips = async (): Promise<Ship[]> => {
   const now = Math.floor(Date.now() / 1000);
   const start = Math.max(0, now - HISTORY_WINDOW_SECONDS);
   const end = now + FUTURE_WINDOW_SECONDS;
   const url = `https://api.shipxy.com/apicall/v3/GetETAShips?key=${SHIPXY_KEY}&port_code=${PORT_CODE}&start_time=${start}&end_time=${end}`;
   const res = await axios.get(url);
-  return res.data?.data || [];
+  const data = res.data?.data || [];
+  return data.filter((ship: Ship) => !isMainlandFlag(ship.ship_flag));
 };
 
-const getLatestSnapshot = () =>
-  db.prepare('SELECT * FROM ships_snapshot WHERE port_code = ? ORDER BY id DESC LIMIT 1').get(PORT_CODE);
+const loadLatestSnapshot = async () => getLatestSnapshot(PORT_CODE);
 
-const saveSnapshot = (data: Ship[]) =>
-  db
-    .prepare(
-      'INSERT INTO ships_snapshot (port_code, time_range, fetched_at, data_json) VALUES (?, ?, ?, ?)'
-    )
-    .run(PORT_CODE, FUTURE_WINDOW_SECONDS, Date.now(), JSON.stringify(data));
+const storeSnapshot = async (data: Ship[]) =>
+  saveSnapshot({
+    port_code: PORT_CODE,
+    time_range: FUTURE_WINDOW_SECONDS,
+    fetched_at: Date.now(),
+    data_json: JSON.stringify(data),
+  });
 
 type TrackedEvent = {
   mmsi: number | string;
@@ -73,19 +73,17 @@ type TrackedEvent = {
   flag?: string;
 };
 
-const saveEvents = (events: TrackedEvent[]) => {
-  const stmt = db.prepare(
-    'INSERT INTO ship_events (port_code, mmsi, ship_flag, event_type, detail, detected_at) VALUES (?, ?, ?, ?, ?, ?)'
-  );
-  events.forEach((event) =>
-    stmt.run(
-      PORT_CODE,
-      String(event.mmsi ?? '').replace(/\.0+$/, ''),
-      event.flag || null,
-      event.type,
-      event.detail,
-      Date.now()
-    )
+const storeEvents = async (events: TrackedEvent[]) => {
+  if (!events.length) return;
+  await saveEvents(
+    events.map((event) => ({
+      port_code: PORT_CODE,
+      mmsi: String(event.mmsi ?? '').replace(/\.0+$/, ''),
+      ship_flag: event.flag || null,
+      event_type: event.type,
+      detail: event.detail,
+      detected_at: Date.now(),
+    }))
   );
 };
 
@@ -138,11 +136,77 @@ const formatRelativeLabel = (timestampMs: number) => {
   return `${days}天前`;
 };
 
-const diffShips = (prev?: Ship[], next?: Ship[], prevFetchedAt?: number): TrackedEvent[] => {
+const pad2 = (value: number) => String(value).padStart(2, '0');
+
+const formatDateKey = (date: Date) =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const getDayRange = (base: Date) => {
+  const start = new Date(base);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+};
+
+const getWeekRange = (base: Date) => {
+  const start = new Date(base);
+  start.setHours(0, 0, 0, 0);
+  const day = start.getDay();
+  const offset = (day + 6) % 7; // Monday as week start
+  start.setDate(start.getDate() - offset);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  return { start, end };
+};
+
+const buildAggregate = (
+  events: { event_type?: string | null; mmsi?: string | null; ship_flag?: string | null }[]
+) => {
+  const arrivalTypes = new Set(['ARRIVAL_SOON', 'ARRIVAL_IMMINENT', 'ARRIVAL_URGENT']);
+  let arrivalEventCount = 0;
+  let riskChangeCount = 0;
+  const arrivalShipSet = new Set<string>();
+  const riskShipSet = new Set<string>();
+  events.forEach((event) => {
+    if (isMainlandFlag(event.ship_flag || '')) return;
+    const type = event.event_type || '';
+    const mmsi = event.mmsi || '';
+    if (arrivalTypes.has(type)) {
+      arrivalEventCount += 1;
+      if (mmsi) arrivalShipSet.add(mmsi);
+    }
+    if (type === 'RISK_LEVEL_CHANGE') {
+      riskChangeCount += 1;
+      if (mmsi) riskShipSet.add(mmsi);
+    }
+  });
+  return {
+    arrival_event_count: arrivalEventCount,
+    arrival_ship_count: arrivalShipSet.size,
+    risk_change_count: riskChangeCount,
+    risk_change_ship_count: riskShipSet.size,
+    updated_at: Date.now(),
+  };
+};
+
+const updateAggregates = async () => {
+  const now = new Date();
+  const dayRange = getDayRange(now);
+  const weekRange = getWeekRange(now);
+  const [dayEvents, weekEvents] = await Promise.all([
+    getShipEventsInRange(dayRange.start.getTime(), dayRange.end.getTime()),
+    getShipEventsInRange(weekRange.start.getTime(), weekRange.end.getTime()),
+  ]);
+  await upsertDailyAggregate(formatDateKey(dayRange.start), buildAggregate(dayEvents));
+  await upsertWeeklyAggregate(formatDateKey(weekRange.start), buildAggregate(weekEvents));
+};
+
+const diffShips = async (prev?: Ship[], next?: Ship[], prevFetchedAt?: number): Promise<TrackedEvent[]> => {
   if (!prev || !next) return [];
   const prevMap = new Map(prev.map((s) => [s.mmsi, s]));
-  const events: any[] = [];
-  next.forEach((ship) => {
+  const events: TrackedEvent[] = [];
+  for (const ship of next) {
     const old = prevMap.get(ship.mmsi);
     if (old && old.eta !== ship.eta) {
       events.push({
@@ -158,10 +222,13 @@ const diffShips = (prev?: Ship[], next?: Ship[], prevFetchedAt?: number): Tracke
       const previousEtaTime = old ? getEtaTimestamp(old) : null;
       const previousDiffMs =
         previousEtaTime !== null && prevFetchedAt !== undefined ? previousEtaTime - prevFetchedAt : null;
-      ARRIVAL_THRESHOLDS.forEach((threshold) => {
+      for (const threshold of ARRIVAL_THRESHOLDS) {
         if (diffMs <= threshold.window) {
           const crossed = previousDiffMs === null || previousDiffMs > threshold.window;
-          const lastArrivalTs = getLastEventTimestamp(ship.mmsi, threshold.type);
+          const lastArrivalTs = await getLastEventTimestamp(
+            String(ship.mmsi ?? '').replace(/\.0+$/, ''),
+            threshold.type
+          );
           const recentlyAlerted = lastArrivalTs ? Date.now() - lastArrivalTs < threshold.window : false;
           if (crossed || !recentlyAlerted) {
             events.push({
@@ -172,7 +239,7 @@ const diffShips = (prev?: Ship[], next?: Ship[], prevFetchedAt?: number): Tracke
             });
           }
         }
-      });
+      }
     }
 
     if (old) {
@@ -257,19 +324,21 @@ const diffShips = (prev?: Ship[], next?: Ship[], prevFetchedAt?: number): Tracke
         });
       }
     }
-  });
+  }
   return events;
 };
 
 const runFetchJob = async () => {
   try {
     const ships = await fetchShips();
-    const prev = getLatestSnapshot();
-    saveSnapshot(ships);
+    const prev = await loadLatestSnapshot();
+    await storeSnapshot(ships);
     if (prev) {
       const previousShips: Ship[] = JSON.parse(prev.data_json);
-      saveEvents(diffShips(previousShips, ships, prev.fetched_at));
+      const events = await diffShips(previousShips, ships, prev.fetched_at);
+      await storeEvents(events);
     }
+    await updateAggregates();
     console.log('Shipxy snapshot updated');
   } catch (err) {
     console.error('Fetch Shipxy failed', err);

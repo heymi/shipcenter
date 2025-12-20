@@ -5,14 +5,12 @@ import { Clock, Ship as ShipIcon, Globe2, RefreshCw, Loader2, ArrowUpRight, Acti
 import { isMainlandFlag } from '../utils/ship';
 import { getRiskLabel, getRiskBadgeClass } from '../utils/risk';
 import { formatSmartWeekdayLabel } from '../utils/date';
-import { fetchShipEvents } from '../api';
+import { fetchDailyAggregates, fetchShipEvents, fetchWeeklyAggregates, ShipAggregate } from '../api';
 import { EVENT_ICON_META } from './eventMeta';
 
 interface DashboardProps {
   ships: Ship[];
   allShips: Ship[];
-  flagFilter: 'ALL' | 'FOREIGN' | 'CHINA';
-  onFlagChange: (filter: 'ALL' | 'FOREIGN' | 'CHINA') => void;
   onRefresh: () => void;
   refreshing: boolean;
   onSelectShip: (ship: Ship | null) => void;
@@ -76,8 +74,6 @@ const getFlagEmoji = (flag?: string) => {
 export const DashboardRadar: React.FC<DashboardProps> = ({
   ships,
   allShips,
-  flagFilter,
-  onFlagChange,
   onRefresh,
   refreshing,
   onSelectShip,
@@ -91,6 +87,10 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
   const [shipEvents, setShipEvents] = useState<ShipEvent[]>([]);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [eventsLoading, setEventsLoading] = useState(false);
+  const [dailyAggregate, setDailyAggregate] = useState<ShipAggregate | null>(null);
+  const [weeklyAggregate, setWeeklyAggregate] = useState<ShipAggregate | null>(null);
+  const [aggregateError, setAggregateError] = useState<string | null>(null);
+  const [aggregateLoading, setAggregateLoading] = useState(false);
 
   const parseEtaToTs = (eta?: string) => {
     if (!eta) return null;
@@ -136,6 +136,36 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const loadAggregates = async () => {
+      if (!import.meta.env.VITE_LOCAL_API) {
+        setDailyAggregate(null);
+        setWeeklyAggregate(null);
+        return;
+      }
+      setAggregateLoading(true);
+      setAggregateError(null);
+      try {
+        const [daily, weekly] = await Promise.all([fetchDailyAggregates(), fetchWeeklyAggregates()]);
+        if (!active) return;
+        setDailyAggregate(daily[0] ?? null);
+        setWeeklyAggregate(weekly[0] ?? null);
+      } catch (err) {
+        console.warn(err);
+        if (active) setAggregateError('统计数据加载失败');
+      } finally {
+        if (active) setAggregateLoading(false);
+      }
+    };
+    loadAggregates();
+    const interval = setInterval(loadAggregates, 10 * 60 * 1000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   const shipLookup = useMemo(() => {
     const map = new Map<string, Ship>();
     const source = allShips.length > 0 ? allShips : ships.length > 0 ? ships : MOCK_SHIPS;
@@ -148,13 +178,10 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
       const key = typeof event.mmsi === 'string' ? event.mmsi : String(event.mmsi);
       const ship = shipLookup.get(key);
       const flag = (event.ship_flag || ship?.flag || '').trim();
-      if (!flag) return flagFilter === 'ALL';
-      const mainland = isMainlandFlag(flag);
-      if (flagFilter === 'FOREIGN') return !mainland;
-      if (flagFilter === 'CHINA') return mainland;
-      return true;
+      if (!flag) return true;
+      return !isMainlandFlag(flag);
     });
-  }, [shipEvents, shipLookup, flagFilter]);
+  }, [shipEvents, shipLookup]);
 
   const displayedEvents = useMemo(() => filteredShipEvents.slice(0, 10), [filteredShipEvents]);
 
@@ -349,25 +376,6 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
                   }`}
                 >
                   未来 {range}
-                </button>
-              ))}
-            </div>
-            <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700 shadow-inner">
-              {[
-                { id: 'FOREIGN', label: '仅外籍' },
-                { id: 'ALL', label: '全部' },
-                { id: 'CHINA', label: '仅中国籍' },
-              ].map((option) => (
-                <button
-                  key={option.id}
-                  onClick={() => onFlagChange(option.id as 'ALL' | 'FOREIGN' | 'CHINA')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                    flagFilter === option.id
-                      ? 'bg-emerald-500 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {option.label}
                 </button>
               ))}
             </div>
@@ -700,6 +708,76 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
               <p className="text-xs text-slate-300">船型种类</p>
             </div>
           </div>
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-lg space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-white">统计概览</h3>
+                <p className="text-xs text-slate-400 mt-1">到港量与风险变动</p>
+              </div>
+              {aggregateLoading && (
+                <span className="text-xs text-slate-400">同步中...</span>
+              )}
+            </div>
+            {aggregateError && (
+              <div className="text-xs text-amber-300 border border-amber-400/30 bg-amber-500/10 rounded-lg px-3 py-2">
+                {aggregateError}
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-3">
+              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                <div className="flex items-center justify-between text-xs text-slate-400">
+                  <span>今日</span>
+                  <span>{dailyAggregate?.day || '—'}</span>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-300">
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-2">
+                    <p className="text-[11px] text-slate-500">到港事件</p>
+                    <p className="text-lg font-semibold text-white">
+                      {dailyAggregate?.arrival_event_count ?? 0}
+                      <span className="text-[11px] text-slate-500 ml-1">
+                        /{dailyAggregate?.arrival_ship_count ?? 0} 艘
+                      </span>
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-2">
+                    <p className="text-[11px] text-slate-500">风险变动</p>
+                    <p className="text-lg font-semibold text-white">
+                      {dailyAggregate?.risk_change_count ?? 0}
+                      <span className="text-[11px] text-slate-500 ml-1">
+                        /{dailyAggregate?.risk_change_ship_count ?? 0} 艘
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                <div className="flex items-center justify-between text-xs text-slate-400">
+                  <span>本周</span>
+                  <span>{weeklyAggregate?.week_start || '—'}</span>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-300">
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-2">
+                    <p className="text-[11px] text-slate-500">到港事件</p>
+                    <p className="text-lg font-semibold text-white">
+                      {weeklyAggregate?.arrival_event_count ?? 0}
+                      <span className="text-[11px] text-slate-500 ml-1">
+                        /{weeklyAggregate?.arrival_ship_count ?? 0} 艘
+                      </span>
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-2">
+                    <p className="text-[11px] text-slate-500">风险变动</p>
+                    <p className="text-lg font-semibold text-white">
+                      {weeklyAggregate?.risk_change_count ?? 0}
+                      <span className="text-[11px] text-slate-500 ml-1">
+                        /{weeklyAggregate?.risk_change_ship_count ?? 0} 艘
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
           <div className="bg-slate-900 rounded-xl border border-slate-800 shadow-lg overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
@@ -719,7 +797,7 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
           </div>
             {displayedEvents.length > 0 ? (
               <div className="divide-y divide-slate-800">
-                {displayedEvents.map((event) => {
+                {displayedEvents.map((event, idx) => {
                   const meta = EVENT_ICON_META[event.event_type] || EVENT_ICON_META.DEFAULT;
                   const IconComp = meta.icon;
                   const eventShipKey =
@@ -732,7 +810,7 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
                   }
                   return (
                     <div
-                      key={`${event.mmsi}-${event.detected_at}`}
+                      key={`${event.mmsi}-${event.detected_at}-${event.event_type}-${idx}`}
                       className="px-6 py-4 flex items-center gap-3"
                     >
                       <div

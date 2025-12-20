@@ -1,7 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Ship, ShipEvent } from '../types';
-import { FollowedShipMeta } from '../api';
-import { fetchShipEvents } from '../api';
+import {
+  FollowedShipFollowup,
+  FollowedShipMeta,
+  createFollowup,
+  autoAnalyzeShipWithAI,
+  fetchShipAiAnalysis,
+  saveShipAiAnalysis,
+  fetchFollowups,
+  fetchShipEvents,
+  ShipAiInference,
+} from '../api';
 import { getRiskBadgeClass, getRiskLabel } from '../utils/risk';
 import { formatSmartWeekdayLabel } from '../utils/date';
 import { formatPortWithCountry } from '../utils/port';
@@ -14,7 +23,7 @@ interface WorkbenchPageProps {
   activeShip: Ship | null;
   setActiveShip: (ship: Ship | null) => void;
   meta: Record<string, FollowedShipMeta>;
-  onUpdateMeta: (mmsi: string, patch: Partial<FollowedShipMeta>) => void;
+  onUpdateMeta: (mmsi: string, patch: Partial<FollowedShipMeta>) => Promise<void>;
   lastUpdatedAt?: number | null;
   onShareFollow?: () => void;
   isSharing?: boolean;
@@ -27,6 +36,26 @@ const formatTimestamp = (ms: number) =>
 const formatUpdateTime = (ts?: number | null) => {
   if (!ts) return '未同步';
   return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+};
+
+const formatMetric = (value?: number, suffix = '') => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  return `${value}${suffix}`;
+};
+
+const toLocalInputValue = (ts?: number | null) => {
+  if (!ts) return '';
+  const date = new Date(ts);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+};
+
+const parseLocalInputValue = (value: string) => {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
 };
 
 const BERTH_OPTIONS = [
@@ -51,6 +80,8 @@ const AGENT_OPTIONS = [
 const TARGET_FLAG = 'DOCKDAY 目标船';
 const GEMINI_API_KEY = (import.meta as any)?.env?.VITE_GEMINI_API_KEY || '';
 const TRANSLATION_CACHE_KEY = 'dockday_ship_translate_v1';
+const FOLLOW_STATUS_OPTIONS = ['关注中', '需回访', '已完成', '异常', '暂停'];
+const MATERIAL_STATUS_OPTIONS = ['未收齐', '待补充', '已收齐', '已核验'];
 const DOCKDAY_VEHICLES_BY_SHIP: Record<
   string,
   {
@@ -149,6 +180,22 @@ const getFlagEmoji = (flag?: string) => {
   return '🚢';
 };
 
+const getDocStatusLabel = (status?: Ship['docStatus']) => {
+  if (!status) return '-';
+  switch (status) {
+    case 'PENDING':
+      return '待补充';
+    case 'REVIEWING':
+      return '审核中';
+    case 'MISSING_INFO':
+      return '缺失材料';
+    case 'APPROVED':
+      return '已完备';
+    default:
+      return '未知';
+  }
+};
+
 const getNormalizedShipKey = (name?: string) =>
   name ? name.toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim() : '';
 
@@ -185,6 +232,28 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   const [expectedCount, setExpectedCount] = useState<string>('');
   const [actualCount, setActualCount] = useState<string>('');
   const [disembarkDate, setDisembarkDate] = useState<string>('');
+  const [cargoType, setCargoType] = useState('');
+  const [crewNationality, setCrewNationality] = useState('');
+  const [crewNationalityDistribution, setCrewNationalityDistribution] = useState('');
+  const [materialStatus, setMaterialStatus] = useState('');
+  const [arrivalRemark, setArrivalRemark] = useState('');
+  const [expectedBerth, setExpectedBerth] = useState('');
+  const [arrivalWindow, setArrivalWindow] = useState('');
+  const [riskNote, setRiskNote] = useState('');
+  const [followStatus, setFollowStatus] = useState('');
+  const [followOwner, setFollowOwner] = useState('');
+  const [followNextAt, setFollowNextAt] = useState('');
+  const [followNote, setFollowNote] = useState('');
+  const [followNextAction, setFollowNextAction] = useState('');
+  const [followups, setFollowups] = useState<FollowedShipFollowup[]>([]);
+  const [followupsLoading, setFollowupsLoading] = useState(false);
+  const [followupsError, setFollowupsError] = useState<string | null>(null);
+  const [followupSaving, setFollowupSaving] = useState(false);
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [aiResults, setAiResults] = useState<Record<string, ShipAiInference | null>>({});
+  const [aiUpdatedAt, setAiUpdatedAt] = useState<Record<string, number | null>>({});
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [aiTranslations, setAiTranslations] = useState<Record<string, string>>(() => {
     if (typeof window === 'undefined') return {};
     try {
@@ -311,6 +380,12 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       setFormAgentContact('');
       setFormAgentPhone('');
       setFormRemark('');
+      setCrewNationalityDistribution('');
+      setMaterialStatus('');
+      setArrivalRemark('');
+      setExpectedBerth('');
+      setArrivalWindow('');
+      setRiskNote('');
       setDirty(false);
       return;
     }
@@ -336,8 +411,42 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
         : ''
     );
     setDisembarkDate(current.disembark_date || '');
+    setCargoType(current.cargo_type || '');
+    setCrewNationality(current.crew_nationality || '');
+    setCrewNationalityDistribution(current.crew_nationality_distribution || '');
+    setMaterialStatus(current.material_status || '');
+    setArrivalRemark(current.arrival_remark || '');
+    setExpectedBerth(current.expected_berth || '');
+    setArrivalWindow(current.arrival_window || '');
+    setRiskNote(current.risk_note || '');
+    setFollowStatus(current.status || '');
+    setFollowOwner(current.owner || '');
+    setFollowNextAt(toLocalInputValue(current.next_followup_at ?? null));
+    setFollowNote('');
+    setFollowNextAction('');
+    setAiError(null);
+    setAiLoading(false);
     setDirty(false);
   }, [activeShip, meta]);
+
+  useEffect(() => {
+    if (!activeShip) return;
+    let mounted = true;
+    fetchShipAiAnalysis(String(activeShip.mmsi))
+      .then((payload) => {
+        if (!mounted) return;
+        if (payload.data) {
+          setAiResults((prev) => ({ ...prev, [String(activeShip.mmsi)]: payload.data }));
+        }
+        setAiUpdatedAt((prev) => ({ ...prev, [String(activeShip.mmsi)]: payload.updated_at ?? null }));
+      })
+      .catch((err) => {
+        console.warn('读取AI分析失败', err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [activeShip]);
 
   useEffect(() => {
     if (!GEMINI_API_KEY) return;
@@ -412,6 +521,9 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       agent_contact_phone: formAgentPhone || null,
       remark: formRemark,
       is_target: isTarget,
+      cargo_type: cargoType || null,
+      crew_nationality: crewNationality || null,
+      crew_nationality_distribution: crewNationalityDistribution || null,
       crew_income_level: crewIncome || null,
       disembark_intent: disembarkIntent || null,
       email_status: emailStatus || null,
@@ -419,6 +531,11 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       expected_disembark_count: expectedCount ? Number(expectedCount) : null,
       actual_disembark_count: actualCount ? Number(actualCount) : null,
       disembark_date: disembarkDate || null,
+      material_status: materialStatus || null,
+      arrival_remark: arrivalRemark || null,
+      expected_berth: expectedBerth || null,
+      arrival_window: arrivalWindow || null,
+      risk_note: riskNote || null,
     });
     setDirty(false);
   };
@@ -443,6 +560,181 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
     }
   }, [tab, setActiveShip]);
 
+  useEffect(() => {
+    if (!activeShip) {
+      setFollowups([]);
+      setFollowupsError(null);
+      setFollowupsLoading(false);
+      return;
+    }
+    setFollowupsLoading(true);
+    setFollowupsError(null);
+    fetchFollowups(String(activeShip.mmsi))
+      .then((rows) => {
+        setFollowups(rows);
+      })
+      .catch((err) => {
+        console.warn('Failed to load followups', err);
+        setFollowupsError('跟进记录加载失败');
+      })
+      .finally(() => {
+        setFollowupsLoading(false);
+      });
+  }, [activeShip]);
+
+  const handleStatusUpdate = async () => {
+    if (!activeShip) return;
+    setStatusSaving(true);
+    try {
+      await onUpdateMeta(activeShip.mmsi, {
+        status: followStatus || null,
+        owner: followOwner || null,
+        next_followup_at: parseLocalInputValue(followNextAt),
+      });
+    } catch (err) {
+      console.warn('Update follow status failed', err);
+      setFollowupsError('状态更新失败');
+    } finally {
+      setStatusSaving(false);
+    }
+  };
+
+  const handleCreateFollowup = async () => {
+    if (!activeShip) return;
+    setFollowupSaving(true);
+    setFollowupsError(null);
+    const nextActionAt = parseLocalInputValue(followNextAt);
+    try {
+      const response = await createFollowup(String(activeShip.mmsi), {
+        mmsi: String(activeShip.mmsi),
+        status: followStatus || null,
+        note: followNote || null,
+        next_action: followNextAction || null,
+        next_action_at: nextActionAt,
+        operator: followOwner || null,
+      });
+      const created = response?.data as FollowedShipFollowup | undefined;
+      if (created) {
+        setFollowups((prev) => [created, ...prev]);
+        await onUpdateMeta(activeShip.mmsi, {
+          status: created.status ?? null,
+          owner: created.operator ?? null,
+          last_followed_at: created.created_at ?? Date.now(),
+          next_followup_at: created.next_action_at ?? null,
+        });
+      }
+      setFollowNote('');
+      setFollowNextAction('');
+    } catch (err) {
+      console.warn('Create followup failed', err);
+      setFollowupsError('跟进记录保存失败');
+    } finally {
+      setFollowupSaving(false);
+    }
+  };
+
+  const handleAutoAiInference = async () => {
+    if (!activeShip) return;
+    setAiLoading(true);
+    setAiError(null);
+    const shipEvents = eventsByShip.get(String(activeShip.mmsi)) ?? [];
+    try {
+      const result = await autoAnalyzeShipWithAI({
+        ship: {
+          name: activeShip.name,
+          mmsi: activeShip.mmsi,
+          imo: activeShip.imo,
+          flag: activeShip.flag,
+          type: activeShip.type,
+          eta: activeShip.eta,
+          etd: activeShip.etd,
+          etaUtc: activeShip.etaUtc,
+          lastTime: activeShip.lastTime,
+          lastTimeUtc: activeShip.lastTimeUtc,
+          dest: activeShip.dest,
+          last_port: activeShip.lastPort,
+          lastPort: activeShip.lastPort,
+          dwt: activeShip.dwt,
+          length: activeShip.length,
+          width: activeShip.width,
+          draught: activeShip.draught,
+          agent: activeShip.agent,
+          docStatus: activeShip.docStatus,
+          riskReason: activeShip.riskReason,
+        },
+        events: shipEvents.slice(0, 6).map((event) => ({
+          event_type: event.event_type,
+          detail: event.detail,
+          detected_at: event.detected_at,
+        })),
+        max_sources: 6,
+        max_per_source: 1,
+      });
+      setAiResults((prev) => ({ ...prev, [String(activeShip.mmsi)]: result }));
+      setAiUpdatedAt((prev) => ({ ...prev, [String(activeShip.mmsi)]: Date.now() }));
+      await saveShipAiAnalysis(String(activeShip.mmsi), result);
+    } catch (err) {
+      console.warn('AI auto inference failed', err);
+      setAiError('自动检索失败，请检查网络或稍后重试');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const getAiFormPatch = (result: ShipAiInference) => {
+    const patch: Partial<FollowedShipMeta> = {};
+    if (result.berth_guess?.value) {
+      patch.berth = result.berth_guess.value;
+    }
+    if (result.agent_guess?.value) {
+      patch.agent = result.agent_guess.value;
+    }
+    if (result.cargo_type_guess?.value) {
+      patch.cargo_type = result.cargo_type_guess.value;
+    }
+    if (result.crew_nationality_guess?.value) {
+      patch.crew_nationality = result.crew_nationality_guess.value;
+    }
+    if (result.crew_count_guess?.value !== undefined && result.crew_count_guess?.value !== null) {
+      patch.crew_count = Number(result.crew_count_guess.value);
+    }
+    return patch;
+  };
+
+  const applyAiToForm = async () => {
+    if (!activeShip) return;
+    const result = aiResults[String(activeShip.mmsi)];
+    if (!result) return;
+    const patch = getAiFormPatch(result);
+    if (Object.keys(patch).length === 0) return;
+    const wasDirty = dirty;
+    if (patch.berth) {
+      setFormBerth(patch.berth);
+    }
+    if (patch.agent) {
+      setFormAgent(patch.agent);
+    }
+    if (patch.cargo_type) {
+      setCargoType(patch.cargo_type);
+    }
+    if (patch.crew_nationality) {
+      setCrewNationality(patch.crew_nationality);
+    }
+    if (patch.crew_count !== undefined && patch.crew_count !== null) {
+      setCrewCount(String(patch.crew_count));
+    }
+    setDirty(true);
+    try {
+      await onUpdateMeta(activeShip.mmsi, patch);
+      if (!wasDirty) {
+        setDirty(false);
+      }
+    } catch (err) {
+      console.warn('AI apply/save failed', err);
+      setAiError('AI 结果写入失败，请手动保存');
+    }
+  };
+
   if (filteredShips.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -463,19 +755,38 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
     <div className="space-y-4 text-slate-200">
       {activeShip ? (
         <>
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">关注详情</p>
-            <p className="text-2xl font-semibold text-white mt-1 flex flex-wrap items-baseline gap-2">
-              {activeShip.name}
-              {getShipCnName(activeShip, aiTranslations) && (
-                <span className="text-sm text-slate-400">
-                  ({getShipCnName(activeShip, aiTranslations)})
-                </span>
-              )}
-            </p>
-            <p className="text-xs text-slate-500 mt-1 font-mono">
-              MMSI {activeShip.mmsi} · 船籍 {activeShip.flag || '-'}
-            </p>
+          <div className="space-y-2">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">关注详情</p>
+                <p className="text-2xl font-semibold text-white mt-1 flex flex-wrap items-baseline gap-2">
+                  {activeShip.name}
+                  {getShipCnName(activeShip, aiTranslations) && (
+                    <span className="text-sm text-slate-400">
+                      ({getShipCnName(activeShip, aiTranslations)})
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs text-slate-500 mt-1 font-mono">
+                  MMSI {activeShip.mmsi} · 船籍 {activeShip.flag || '-'}
+                </p>
+              </div>
+              <button
+                onClick={handleAutoAiInference}
+                disabled={aiLoading}
+                className={`px-3 py-2 rounded-lg text-xs font-medium border transition ${
+                  aiLoading
+                    ? 'border-slate-700 text-slate-500 cursor-not-allowed'
+                    : 'border-emerald-400 text-white hover:bg-emerald-500/10'
+                }`}
+              >
+                {aiLoading
+                  ? 'AI 分析中...'
+                  : aiResults[String(activeShip.mmsi)]
+                    ? '更新分析'
+                    : 'AI 分析'}
+              </button>
+            </div>
             <div className="flex items-center gap-2 mt-2 flex-wrap">
               <span
                 className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${getRiskBadgeClass(
@@ -492,6 +803,11 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
               <span className="text-xs text-slate-400">
                 ETA {activeShip.eta?.replace('T', ' ') || '-'}
               </span>
+              {aiUpdatedAt[String(activeShip.mmsi)] && (
+                <span className="text-xs text-slate-500">
+                  上次分析 {formatTimestamp(aiUpdatedAt[String(activeShip.mmsi)] || 0)}
+                </span>
+              )}
             </div>
           </div>
           <div className="rounded-xl border border-slate-800 p-3 text-sm text-slate-200 space-y-1">
@@ -500,289 +816,172 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
             <p className="text-xs text-slate-500">
               上一港 {formatPortWithCountry(activeShip.lastPort)}
             </p>
-            {(formAgentContact || formAgentPhone) && (
-              <p className="text-xs text-slate-500">
-                代理人 {formAgentContact || '-'} {formAgentPhone || ''}
-              </p>
+          </div>
+          <div className="rounded-xl border border-slate-800 p-3 text-sm text-slate-200">
+            <p className="text-xs text-slate-400 mb-2">标准真实数据</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-slate-300">
+              <div>
+                <p className="text-[10px] text-slate-500">船型</p>
+                <p className="text-sm text-white">{activeShip.type || '-'}</p>
+              </div>
+              <div>
+                <p className="text-[10px] text-slate-500">DWT</p>
+                <p className="text-sm text-white">{formatMetric(activeShip.dwt, ' t')}</p>
+              </div>
+              <div>
+                <p className="text-[10px] text-slate-500">吃水</p>
+                <p className="text-sm text-white">{formatMetric(activeShip.draught, ' m')}</p>
+              </div>
+              <div>
+                <p className="text-[10px] text-slate-500">船长/船宽</p>
+                <p className="text-sm text-white">
+                  {formatMetric(activeShip.length, ' m')} / {formatMetric(activeShip.width, ' m')}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] text-slate-500">ETD</p>
+                <p className="text-sm text-white">{activeShip.etd?.replace('T', ' ') || '-'}</p>
+              </div>
+              <div>
+                <p className="text-[10px] text-slate-500">AIS 更新时间</p>
+                <p className="text-sm text-white">{activeShip.lastTime || '-'}</p>
+              </div>
+              <div>
+                <p className="text-[10px] text-slate-500">代理公司</p>
+                <p className="text-sm text-white">{activeShip.agent || '-'}</p>
+              </div>
+              <div>
+                <p className="text-[10px] text-slate-500">材料状态</p>
+                <p className="text-sm text-white">{getDocStatusLabel(activeShip.docStatus)}</p>
+              </div>
+            </div>
+            {activeShip.riskReason && (
+              <p className="text-xs text-slate-500 mt-3">风险原因：{activeShip.riskReason}</p>
             )}
           </div>
-          <div className="rounded-xl border border-slate-800 p-3 text-sm text-slate-200 space-y-3">
+          <div className="rounded-xl border border-slate-800 p-3 text-sm text-slate-200 space-y-2">
+            <p className="text-xs text-slate-400">Dockday 目标船只</p>
             <label className="flex items-center gap-2 text-sm text-slate-200">
               <input
                 type="checkbox"
                 checked={isTarget}
                 onChange={(e) => {
-                  setIsTarget(e.target.checked);
-                  setDirty(true);
+                  const checked = e.target.checked;
+                  setIsTarget(checked);
+                  void onUpdateMeta(activeShip.mmsi, { is_target: checked });
                 }}
                 className="h-4 w-4 rounded border-slate-600 text-emerald-400 focus:ring-emerald-500 bg-slate-900"
               />
               添加为 Dockday 目标船只
             </label>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">船员平均收入水平</label>
-                <select
-                  value={crewIncome}
-                  onChange={(e) => {
-                    setCrewIncome(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                >
-                  <option value="">请选择</option>
-                  {['低', '中', '高', '不确定'].map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">下船意愿</label>
-                <select
-                  value={disembarkIntent}
-                  onChange={(e) => {
-                    setDisembarkIntent(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                >
-                  <option value="">请选择</option>
-                  {['不确定', '低', '中', '强烈'].map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">邮件沟通</label>
-                <select
-                  value={emailStatus}
-                  onChange={(e) => {
-                    setEmailStatus(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                >
-                  <option value="">请选择</option>
-                  {['未发送', '已发送'].map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-slate-400">停靠码头</label>
-              <select
-                value={formBerth}
-                onChange={(e) => {
-                  setFormBerth(e.target.value);
-                  setDirty(true);
-                }}
-                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-              >
-                <option value="">请选择</option>
-                {BERTH_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-slate-400">船舶代理</label>
-              <select
-                value={formAgent}
-                onChange={(e) => {
-                  setFormAgent(e.target.value);
-                  setDirty(true);
-                }}
-                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-              >
-                <option value="">请选择</option>
-                {AGENT_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">代理人姓名</label>
-                <input
-                  value={formAgentContact}
-                  onChange={(e) => {
-                    setFormAgentContact(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                  placeholder="联系人姓名"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">代理人电话</label>
-                <input
-                  value={formAgentPhone}
-                  onChange={(e) => {
-                    setFormAgentPhone(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                  placeholder="联系电话"
-                />
-              </div>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-slate-400">备注</label>
-              <textarea
-                value={formRemark}
-                onChange={(e) => {
-                  setFormRemark(e.target.value);
-                  setDirty(true);
-                }}
-                rows={3}
-                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none resize-none"
-                placeholder="可填写靠泊计划、查验要求、值班人等"
-              />
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">下船日期</label>
-                <input
-                  type="date"
-                  value={disembarkDate}
-                  onChange={(e) => {
-                    setDisembarkDate(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">船员数量</label>
-                <input
-                  type="number"
-                  min={0}
-                  value={crewCount}
-                  onChange={(e) => {
-                    setCrewCount(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                  placeholder="人数"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">预计下船人数</label>
-                <input
-                  type="number"
-                  min={0}
-                  value={expectedCount}
-                  onChange={(e) => {
-                    setExpectedCount(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                  placeholder="预计下船"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-slate-400">实际下船人数</label>
-                <input
-                  type="number"
-                  min={0}
-                  value={actualCount}
-                  onChange={(e) => {
-                    setActualCount(e.target.value);
-                    setDirty(true);
-                  }}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-emerald-400 focus:outline-none"
-                  placeholder="实际下船"
-                />
-              </div>
-            </div>
-            <div className="flex justify-end">
-              <button
-                onClick={saveFollowMeta}
-                disabled={!dirty}
-                className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
-                  dirty
-                    ? 'border-emerald-400 text-white hover:bg-emerald-500/10'
-                    : 'border-slate-700 text-slate-500 cursor-not-allowed'
-                }`}
-              >
-                {dirty ? '保存' : '已保存'}
-              </button>
-            </div>
           </div>
-          {meta[activeShip.mmsi]?.is_target && (
-            <div className="rounded-xl border border-amber-400/40 bg-amber-500/5 p-3 text-sm text-slate-200 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-xs uppercase tracking-[0.2em] text-amber-200">Dockday 目标船 · 下船联动</p>
-                <span className="text-[11px] text-amber-100">生命周期跟踪中</span>
+          <div className="rounded-xl border border-slate-800 p-3 text-sm text-slate-200 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">AI 推测</p>
+              <span className="text-[11px] text-slate-500">仅供参考</span>
+            </div>
+            {aiError && (
+              <div className="flex items-center gap-2 text-amber-300 text-xs">
+                <AlertCircle className="w-3.5 h-3.5" />
+                {aiError}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="rounded-lg border border-amber-400/30 bg-slate-900/60 p-3">
-                  <p className="text-xs text-amber-200">船员下船信息</p>
-                  <p className="text-sm text-slate-200 mt-1">
-                    总人数 {crewCount || '—'} · 预计 {expectedCount || '—'} · 实际 {actualCount || '—'}
-                  </p>
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    收入 {crewIncome || '未填写'} · 意愿 {disembarkIntent || '未填写'}
-                  </p>
-                </div>
-                <div className="rounded-lg border border-amber-400/30 bg-slate-900/60 p-3">
-                  <p className="text-xs text-amber-200">沟通进度</p>
-                  <p className="text-sm text-slate-200 mt-1">
-                    邮件 {emailStatus || '未填写'} · 码头 {formBerth || '未填写'}
-                  </p>
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    代理 {formAgent || '未填写'} · {formAgentContact || '未填写'} {formAgentPhone || ''}
-                  </p>
-                </div>
-                <div className="rounded-lg border border-amber-400/30 bg-slate-900/60 p-3">
-                  <p className="text-xs text-amber-200">车辆跟踪</p>
-                  <p className="text-sm text-slate-200 mt-1">
-                    {DOCKDAY_VEHICLES_BY_SHIP[activeShip.name]?.length || 0} 辆在途
-                  </p>
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    下船日期 {disembarkDate || '未填写'}
-                  </p>
-                </div>
-              </div>
-              <div className="space-y-2">
-                {(DOCKDAY_VEHICLES_BY_SHIP[activeShip.name] || []).map((vehicle, idx) => (
-                  <div
-                    key={`${vehicle.plate}-${idx}`}
-                    className="rounded-lg border border-amber-400/20 bg-slate-900/70 p-3"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm text-white font-semibold">
-                        {vehicle.model} · {vehicle.plate}
+            )}
+            {aiResults[String(activeShip.mmsi)] && (
+              <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                {(() => {
+                  const result = aiResults[String(activeShip.mmsi)];
+                  if (!result) return null;
+                  if (result.parse_error) {
+                    return (
+                      <div className="text-xs text-slate-400">
+                        分析结果解析失败，请点击“更新分析”重新获取。
                       </div>
-                      <span className="text-[11px] px-2 py-0.5 rounded-full border border-amber-400/50 text-amber-100">
-                        {vehicle.status}
-                      </span>
+                    );
+                  }
+                  const renderConfidence = (block?: any) => {
+                    const level = block?.confidence || 'low';
+                    const pct =
+                      typeof block?.confidence_pct === 'number' && Number.isFinite(block?.confidence_pct)
+                        ? `${Math.round(block.confidence_pct)}%`
+                        : null;
+                    return pct ? `${level} · ${pct}` : level;
+                  };
+                  const renderBlock = (label: string, block?: any) => (
+                    <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-2">
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>{label}</span>
+                        <span>{renderConfidence(block)}</span>
+                      </div>
+                      <p className="text-sm text-white mt-1">{block?.value || '无法判断'}</p>
+                      {Array.isArray(block?.rationale) && block.rationale.length > 0 && (
+                        <p className="text-[11px] text-slate-500 mt-1">
+                          {block.rationale.join('；')}
+                        </p>
+                      )}
                     </div>
-                    <div className="text-xs text-slate-400 mt-2 space-y-1">
-                      <p>司机 {vehicle.driver} · {vehicle.driverPhone}</p>
-                      <p>翻译 {vehicle.translator} · {vehicle.translatorPhone}</p>
-                      <p>出发 {vehicle.departTime} · 返回 {vehicle.returnTime}</p>
+                  );
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                      {renderBlock('货物类型', result.cargo_type_guess)}
+                      {renderBlock('停靠码头', result.berth_guess)}
+                      {renderBlock('代理公司', result.agent_guess)}
+                      {renderBlock('船员国籍', result.crew_nationality_guess)}
+                      <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-2">
+                        <div className="flex items-center justify-between text-[11px] text-slate-400">
+                          <span>船员人数</span>
+                          <span>{renderConfidence(result.crew_count_guess)}</span>
+                        </div>
+                        <p className="text-sm text-white mt-1">
+                          {result.crew_count_guess?.value ?? '无法判断'}
+                        </p>
+                        {Array.isArray(result.crew_count_guess?.rationale) &&
+                          result.crew_count_guess?.rationale?.length ? (
+                          <p className="text-[11px] text-slate-500 mt-1">
+                            {result.crew_count_guess?.rationale?.join('；')}
+                          </p>
+                        ) : null}
+                      </div>
                     </div>
+                  );
+                })()}
+                <div className="flex justify-end">
+                  <button
+                    onClick={applyAiToForm}
+                    className="px-3 py-2 rounded-lg text-xs font-medium border border-emerald-400 text-white hover:bg-emerald-500/10 transition"
+                  >
+                    填入并保存
+                  </button>
+                </div>
+                {Array.isArray(aiResults[String(activeShip.mmsi)]?.citations) &&
+                  aiResults[String(activeShip.mmsi)]?.citations?.length ? (
+                  <div className="space-y-1 text-[11px] text-slate-500">
+                    <p className="text-slate-400">引用来源</p>
+                    {aiResults[String(activeShip.mmsi)]?.citations?.slice(0, 6).map((item, idx) => (
+                      <a
+                        key={`${item.url}-${idx}`}
+                        href={item.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block truncate hover:text-emerald-300"
+                      >
+                        {item.title || item.url}
+                      </a>
+                    ))}
                   </div>
-                ))}
-                {(!DOCKDAY_VEHICLES_BY_SHIP[activeShip.name] ||
-                  DOCKDAY_VEHICLES_BY_SHIP[activeShip.name].length === 0) && (
-                  <p className="text-xs text-slate-500">暂无车辆调度信息</p>
+                ) : null}
+                {aiResults[String(activeShip.mmsi)]?.signals && (
+                  <p className="text-[11px] text-slate-500">
+                    信号：{aiResults[String(activeShip.mmsi)]?.signals?.join('；') || '无'}
+                  </p>
+                )}
+                {aiResults[String(activeShip.mmsi)]?.disclaimer && (
+                  <p className="text-[11px] text-slate-500">
+                    {aiResults[String(activeShip.mmsi)]?.disclaimer}
+                  </p>
                 )}
               </div>
-            </div>
-          )}
+            )}
+          </div>
           <div className="rounded-xl border border-slate-800 p-3 text-sm text-slate-200">
             <p className="text-xs text-slate-400 mb-2">最新动态</p>
             {(() => {

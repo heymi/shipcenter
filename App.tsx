@@ -7,7 +7,16 @@ import { ShipDetailModal } from './components/ShipDetailModal';
 import { WorkbenchPage } from './components/WorkbenchPage';
 import { CrewDisembarkPage } from './components/CrewDisembarkPage';
 import { CrewLifecyclePage } from './components/CrewLifecyclePage';
-import { fetchETAShips, fetchFollowedShips, upsertFollowedShip, deleteFollowedShip, FollowedShipMeta } from './api';
+import {
+  fetchETAShips,
+  fetchFollowedShips,
+  fetchSharedFollowedShips,
+  upsertFollowedShip,
+  deleteFollowedShip,
+  FollowedShipMeta,
+} from './api';
+import { supabase } from './supabaseClient';
+import type { Session } from '@supabase/supabase-js';
 import { MOCK_SHIPS } from './constants';
 import { SHIP_CN_NAME_OVERRIDES } from './shipNameMap';
 import { Ship, RiskLevel, DocStatus, ShipxyShip } from './types';
@@ -65,7 +74,7 @@ const transformApiData = (apiShips: ShipxyShip[]): Ship[] => {
       riskReason: riskEvaluation.reason,
       docStatus,
       lastPort: s.preport_cnname || 'Unknown',
-      agent: 'Dockday Shipping Agency', // Mock Agent
+      agent: '',
     };
   });
 };
@@ -108,6 +117,23 @@ const deleteCookie = (name: string) => {
   document.cookie = `${name}=; path=/; expires=${new Date(0).toUTCString()}`;
 };
 
+const parseEmailAllowlist = (raw: string) =>
+  raw
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+
+const isEmailAllowed = (email: string, allowlist: string[]) => {
+  const normalized = email.trim().toLowerCase();
+  return allowlist.some((entry) => {
+    if (entry.startsWith('*@')) {
+      const domain = entry.slice(2);
+      return normalized.endsWith(`@${domain}`);
+    }
+    return normalized === entry;
+  });
+};
+
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState('dashboard');
   const [allShips, setAllShips] = useState<Ship[]>([]);
@@ -116,7 +142,6 @@ const App: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [flagFilter, setFlagFilter] = useState<'ALL' | 'FOREIGN' | 'CHINA'>('FOREIGN');
   const [activeShip, setActiveShip] = useState<Ship | null>(null);
   const [workbenchShip, setWorkbenchShip] = useState<Ship | null>(null);
   const [followedShipsMap, setFollowedShipsMap] = useState<Record<string, Ship>>({});
@@ -143,10 +168,25 @@ const App: React.FC = () => {
     active: boolean;
   } | null>(null);
   const [shareMetaStatus, setShareMetaStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authStatus, setAuthStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const authAllowlist = useMemo(() => {
+    const env =
+      typeof import.meta !== 'undefined' ? ((import.meta as any).env?.VITE_AUTH_EMAIL_ALLOWLIST as string) : '';
+    return parseEmailAllowlist(env || '');
+  }, []);
   const shareMessageTimer = useRef<number | null>(null);
-  const flagFilterRef = useRef(flagFilter);
-  const LOCAL_FOLLOW_CACHE = 'dockday_follow_cache_v1';
-  const LOCAL_FOLLOW_QUEUE = 'dockday_follow_queue_v1';
+  const LOCAL_FOLLOW_CACHE = useMemo(() => {
+    if (session?.user?.id) return `dockday_follow_cache_v1_${session.user.id}`;
+    return 'dockday_follow_cache_v1_anonymous';
+  }, [session?.user?.id]);
+  const LOCAL_FOLLOW_QUEUE = useMemo(() => {
+    if (session?.user?.id) return `dockday_follow_queue_v1_${session.user.id}`;
+    return 'dockday_follow_queue_v1_anonymous';
+  }, [session?.user?.id]);
   const localApiBase = useMemo(() => {
     if (API_CONFIG.LOCAL_API) return API_CONFIG.LOCAL_API;
     if (typeof window === 'undefined') return '';
@@ -154,9 +194,6 @@ const App: React.FC = () => {
     return `${protocol}//${hostname}:4000`;
   }, []);
   const hasLocalApi = Boolean(localApiBase);
-  useEffect(() => {
-    flagFilterRef.current = flagFilter;
-  }, [flagFilter]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -177,6 +214,31 @@ const App: React.FC = () => {
       setShareToken(null);
       setShareVerified(true);
     }
+  }, []);
+
+  useEffect(() => {
+    if (shareMode) return;
+    if (!authReady) return;
+    setFollowedMeta({});
+    setFollowedShipsMap({});
+    setFollowOpsQueue([]);
+    setFollowQueueBlocked(false);
+  }, [session?.user?.id, authReady, shareMode]);
+
+  useEffect(() => {
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!active) return;
+      setSession(data.session ?? null);
+      setAuthReady(true);
+    });
+    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -263,7 +325,7 @@ const App: React.FC = () => {
         console.warn('persist follow cache failed', err);
       }
     },
-    []
+    [LOCAL_FOLLOW_CACHE]
   );
 
   const persistQueue = useCallback(
@@ -275,7 +337,7 @@ const App: React.FC = () => {
         console.warn('persist follow queue failed', err);
       }
     },
-    []
+    [LOCAL_FOLLOW_QUEUE]
   );
 
   const showShareMessage = useCallback((msg: string) => {
@@ -315,18 +377,54 @@ const App: React.FC = () => {
     }
   }, [showShareMessage]);
 
+  const handleMagicLink = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      const email = authEmail.trim();
+      if (!email) {
+        setAuthError('请输入邮箱地址');
+        setAuthStatus('error');
+        return;
+      }
+      if (authAllowlist.length && !isEmailAllowed(email, authAllowlist)) {
+        setAuthError('该邮箱不在白名单内，请联系 Dockday 官方人员');
+        setAuthStatus('error');
+        return;
+      }
+      setAuthStatus('sending');
+      setAuthError(null);
+      const redirectTo = typeof window !== 'undefined' ? window.location.origin : undefined;
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: { emailRedirectTo: redirectTo },
+      });
+      if (error) {
+        setAuthStatus('error');
+        setAuthError(error.message || '发送失败，请稍后重试');
+        return;
+      }
+      setAuthStatus('sent');
+    },
+    [authEmail, authAllowlist]
+  );
+
+  const handleLogout = useCallback(async () => {
+    await supabase.auth.signOut();
+  }, []);
+
   const handleShareToggle = useCallback(
     async (target: 'arrivals' | 'workspace') => {
       if (!hasLocalApi) {
         showShareMessage('请先启动后端 API 服务再尝试分享');
         return;
       }
+      const authHeader = session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
       if (activeShares[target]) {
         const { token } = activeShares[target]!;
         try {
           await fetch(`${localApiBase}/share-links/stop`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...authHeader },
             body: JSON.stringify({ token }),
           });
         } catch (err) {
@@ -350,7 +448,7 @@ const App: React.FC = () => {
       try {
         const resp = await fetch(`${localApiBase}/share-links/start`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeader },
           body: JSON.stringify({ token, target, password_hash: encoded }),
         });
         if (!resp.ok) {
@@ -375,7 +473,7 @@ const App: React.FC = () => {
       setActiveShares((prev) => ({ ...prev, [target]: { token } }));
       setShareModal({ target, url: url.toString(), password });
     },
-    [activeShares, showShareMessage, hasLocalApi, localApiBase]
+    [activeShares, showShareMessage, hasLocalApi, localApiBase, session]
   );
 
   const handleShareAccess = useCallback(
@@ -426,6 +524,11 @@ const App: React.FC = () => {
               mmsi: job.mmsi,
               berth: job.payload?.berth,
               agent: job.payload?.agent,
+              material_status: job.payload?.material_status,
+              arrival_remark: job.payload?.arrival_remark,
+              expected_berth: job.payload?.expected_berth,
+              arrival_window: job.payload?.arrival_window,
+              risk_note: job.payload?.risk_note,
               agent_contact_name: job.payload?.agent_contact_name,
               agent_contact_phone: job.payload?.agent_contact_phone,
               remark: job.payload?.remark,
@@ -434,6 +537,8 @@ const App: React.FC = () => {
               disembark_intent: job.payload?.disembark_intent,
               email_status: job.payload?.email_status,
               crew_count: job.payload?.crew_count,
+              crew_nationality: job.payload?.crew_nationality,
+              crew_nationality_distribution: job.payload?.crew_nationality_distribution,
               expected_disembark_count: job.payload?.expected_disembark_count,
               actual_disembark_count: job.payload?.actual_disembark_count,
               disembark_date: job.payload?.disembark_date,
@@ -475,6 +580,12 @@ const App: React.FC = () => {
                 agent_contact_name: item.agent_contact_name ?? null,
                 agent_contact_phone: item.agent_contact_phone ?? null,
                 disembark_date: item.disembark_date ?? null,
+                material_status: item.material_status ?? null,
+                arrival_remark: item.arrival_remark ?? null,
+                expected_berth: item.expected_berth ?? null,
+                arrival_window: item.arrival_window ?? null,
+                risk_note: item.risk_note ?? null,
+                crew_nationality_distribution: item.crew_nationality_distribution ?? null,
               };
             return acc;
           }, {});
@@ -493,6 +604,54 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const loadFollowed = async () => {
+      if (shareMode === 'workspace') {
+        if (!shareVerified) {
+          setFollowQueueBlocked(true);
+          return;
+        }
+        if (!hasLocalApi || !shareToken) {
+          setFollowQueueBlocked(true);
+          return;
+        }
+        try {
+          const metas = await fetchSharedFollowedShips(shareToken);
+          const metaMap = metas.reduce<Record<string, FollowedShipMeta>>((acc, item) => {
+            if (item.mmsi)
+              acc[String(item.mmsi)] = {
+                ...item,
+                is_target: !!(item as any).is_target,
+                crew_income_level: item.crew_income_level ?? null,
+                disembark_intent: item.disembark_intent ?? null,
+                email_status: item.email_status ?? null,
+                crew_count: item.crew_count ?? null,
+                expected_disembark_count: item.expected_disembark_count ?? null,
+                actual_disembark_count: item.actual_disembark_count ?? null,
+                agent_contact_name: item.agent_contact_name ?? null,
+                agent_contact_phone: item.agent_contact_phone ?? null,
+                disembark_date: item.disembark_date ?? null,
+                material_status: item.material_status ?? null,
+                arrival_remark: item.arrival_remark ?? null,
+                expected_berth: item.expected_berth ?? null,
+                arrival_window: item.arrival_window ?? null,
+                risk_note: item.risk_note ?? null,
+                crew_nationality_distribution: item.crew_nationality_distribution ?? null,
+              };
+            return acc;
+          }, {});
+          setFollowedMeta(metaMap);
+          setFollowedShipsMap({});
+          setFollowedDataUpdatedAt(Date.now());
+          setFollowQueueBlocked(true);
+        } catch (err) {
+          console.warn('Failed to load shared followed meta', err);
+          setFollowQueueBlocked(true);
+        }
+        return;
+      }
+      if (!session || !authReady) {
+        setFollowQueueBlocked(true);
+        return;
+      }
       let localMeta: Record<string, FollowedShipMeta> = {};
       let localShips: Record<string, Ship> = {};
       let localQueue: { op: 'follow' | 'unfollow' | 'update'; mmsi: string; payload?: FollowedShipMeta }[] =
@@ -541,6 +700,12 @@ const App: React.FC = () => {
               agent_contact_name: item.agent_contact_name ?? null,
               agent_contact_phone: item.agent_contact_phone ?? null,
               disembark_date: item.disembark_date ?? null,
+              material_status: item.material_status ?? null,
+              arrival_remark: item.arrival_remark ?? null,
+              expected_berth: item.expected_berth ?? null,
+              arrival_window: item.arrival_window ?? null,
+              risk_note: item.risk_note ?? null,
+              crew_nationality_distribution: item.crew_nationality_distribution ?? null,
             };
           return acc;
         }, {});
@@ -559,7 +724,7 @@ const App: React.FC = () => {
       }
     };
     loadFollowed();
-  }, [persistLocalFollow, hasLocalApi]);
+  }, [persistLocalFollow, hasLocalApi, shareMode, shareToken, shareVerified, session, authReady]);
 
   const followedMmsiSet = useMemo(() => new Set(Object.keys(followedMeta)), [followedMeta]);
   const dockdayTargetSet = useMemo(() => {
@@ -596,16 +761,9 @@ const App: React.FC = () => {
     return list;
   }, [followedMmsiSet, allShips, followedShipsMap]);
 
-  const filterShipsByFlag = (shipList: Ship[], filter: 'ALL' | 'FOREIGN' | 'CHINA') => {
-    if (filter === 'FOREIGN') {
-      const filtered = shipList.filter((ship) => !isMainlandFlag(ship.flag));
-      return filtered.length > 0 ? filtered : shipList;
-    }
-    if (filter === 'CHINA') {
-      const filtered = shipList.filter((ship) => isMainlandFlag(ship.flag));
-      return filtered.length > 0 ? filtered : shipList;
-    }
-    return shipList;
+  const filterForeignShips = (shipList: Ship[]) => {
+    const filtered = shipList.filter((ship) => !isMainlandFlag(ship.flag));
+    return filtered.length > 0 ? filtered : [];
   };
 
   const loadData = useCallback(
@@ -628,16 +786,18 @@ const App: React.FC = () => {
           const fallbackShips = getFreshMockShips();
           const formattedShips = transformApiData(res.data || []);
           const finalShips = formattedShips.length > 0 ? formattedShips : fallbackShips;
-          setAllShips(finalShips);
-          setShips(filterShipsByFlag(finalShips, flagFilterRef.current));
+          const foreignShips = filterForeignShips(finalShips);
+          setAllShips(foreignShips);
+          setShips(foreignShips);
           setShipDataUpdatedAt(Date.now());
           setNotice(formattedShips.length > 0 ? null : '接口无返回，展示示例数据');
         } else {
           const fallbackShips = getFreshMockShips();
           setError(null);
           setNotice((res.msg || '数据加载失败') + '，已展示示例数据');
-          setAllShips(fallbackShips);
-          setShips(filterShipsByFlag(fallbackShips, flagFilterRef.current));
+          const foreignShips = filterForeignShips(fallbackShips);
+          setAllShips(foreignShips);
+          setShips(foreignShips);
           setShipDataUpdatedAt(Date.now());
         }
       } catch (err) {
@@ -645,8 +805,9 @@ const App: React.FC = () => {
         setError(null);
         setNotice('网络请求失败，已展示示例数据');
         const fallbackShips = getFreshMockShips();
-        setAllShips(fallbackShips);
-        setShips(filterShipsByFlag(fallbackShips, flagFilterRef.current));
+        const foreignShips = filterForeignShips(fallbackShips);
+        setAllShips(foreignShips);
+        setShips(foreignShips);
         setShipDataUpdatedAt(Date.now());
       } finally {
         if (!silent) setLoading(false);
@@ -662,13 +823,15 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!hasLocalApi) return;
+    if (shareMode || !session || !authReady) return;
     if (followOpsQueue.length > 0 && !followQueueBlocked) {
       flushFollowQueue();
     }
-  }, [followOpsQueue, flushFollowQueue, hasLocalApi, followQueueBlocked]);
+  }, [followOpsQueue, flushFollowQueue, hasLocalApi, followQueueBlocked, shareMode, session, authReady]);
 
   useEffect(() => {
     if (!hasLocalApi) return;
+    if (shareMode || !session || !authReady) return;
     if (followQueueBlocked) return;
     const timer = setInterval(() => {
       if (followOpsQueue.length > 0) {
@@ -676,7 +839,7 @@ const App: React.FC = () => {
       }
     }, 60 * 1000);
     return () => clearInterval(timer);
-  }, [followOpsQueue.length, flushFollowQueue, followQueueBlocked, hasLocalApi]);
+  }, [followOpsQueue.length, flushFollowQueue, followQueueBlocked, hasLocalApi, shareMode, session, authReady]);
 
   useEffect(() => {
     if (!AUTO_REFRESH_MS) return;
@@ -686,9 +849,6 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [loadData]);
 
-  useEffect(() => {
-    setShips(filterShipsByFlag(allShips, flagFilter));
-  }, [allShips, flagFilter]);
 
   useEffect(() => {
     setFollowedShipsMap((prev) => {
@@ -817,17 +977,30 @@ const App: React.FC = () => {
           mmsi,
           berth: nextMeta.berth,
           agent: nextMeta.agent,
+          cargo_type: nextMeta.cargo_type,
+          crew_nationality: nextMeta.crew_nationality,
           agent_contact_name: nextMeta.agent_contact_name,
           agent_contact_phone: nextMeta.agent_contact_phone,
           remark: nextMeta.remark,
           is_target: nextMeta.is_target,
+          status: nextMeta.status,
+          owner: nextMeta.owner,
           crew_income_level: nextMeta.crew_income_level,
           disembark_intent: nextMeta.disembark_intent,
           email_status: nextMeta.email_status,
           crew_count: nextMeta.crew_count,
+          crew_nationality: nextMeta.crew_nationality,
+          crew_nationality_distribution: nextMeta.crew_nationality_distribution,
           expected_disembark_count: nextMeta.expected_disembark_count,
           actual_disembark_count: nextMeta.actual_disembark_count,
           disembark_date: nextMeta.disembark_date,
+          last_followed_at: nextMeta.last_followed_at,
+          next_followup_at: nextMeta.next_followup_at,
+          material_status: nextMeta.material_status,
+          arrival_remark: nextMeta.arrival_remark,
+          expected_berth: nextMeta.expected_berth,
+          arrival_window: nextMeta.arrival_window,
+          risk_note: nextMeta.risk_note,
         });
         setFollowedMeta((prev) => {
           const next = { ...prev, [mmsi]: nextMeta };
@@ -857,14 +1030,12 @@ const App: React.FC = () => {
     switch (currentView) {
       case 'dashboard':
         return (
-          <DashboardRadar
-            ships={ships}
-            allShips={allShips}
-            flagFilter={flagFilter}
-            onFlagChange={setFlagFilter}
-            onRefresh={() => loadData({ silent: true })}
-            refreshing={refreshing}
-            onSelectShip={setActiveShip}
+            <DashboardRadar
+              ships={ships}
+              allShips={allShips}
+              onRefresh={() => loadData({ silent: true })}
+              refreshing={refreshing}
+              onSelectShip={setActiveShip}
             onNavigateToEvents={() => {
               setCurrentView('events');
               setEventsTab('events');
@@ -898,6 +1069,8 @@ const App: React.FC = () => {
             ships={ships}
             allShips={allShips}
             onSelectShip={(ship) => setActiveShip(ship)}
+            onFollowShip={handleFollowShip}
+            followedSet={followedMmsiSet}
             dockdayTargetSet={dockdayTargetSet}
             tab={eventsTab}
             onTabChange={setEventsTab}
@@ -923,8 +1096,6 @@ const App: React.FC = () => {
           <DashboardRadar
             ships={ships}
             allShips={allShips}
-            flagFilter={flagFilter}
-            onFlagChange={setFlagFilter}
             onRefresh={() => loadData({ silent: true })}
             refreshing={refreshing}
             onSelectShip={setActiveShip}
@@ -945,6 +1116,18 @@ const App: React.FC = () => {
             <Loader2 className="w-8 h-8 text-blue-400 animate-spin mb-2" />
             <p className="text-sm text-slate-300 font-medium">正在同步预抵船舶数据...</p>
           </div>
+        </div>
+      )}
+
+      {session && !shareMode && (
+        <div className="mb-4 flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm text-slate-200 md:flex-row md:items-center md:justify-between">
+          <span>已登录：{session.user?.email || '未知账号'}</span>
+          <button
+            onClick={handleLogout}
+            className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 hover:text-white transition"
+          >
+            退出登录
+          </button>
         </div>
       )}
 
@@ -1017,6 +1200,55 @@ const App: React.FC = () => {
     </>
   );
 
+  if (!shareMode && !authReady) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-3 text-slate-300">
+          <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+          <p className="text-sm">正在读取登录状态...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!shareMode && !session) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <div className="w-full max-w-md rounded-[28px] border border-white/10 bg-white/5 p-8 shadow-[0_20px_60px_rgba(15,23,42,0.65)] backdrop-blur-xl">
+          <div className="space-y-2 text-center">
+            <p className="text-xs uppercase tracking-[0.35em] text-slate-400">DockDay</p>
+            <h1 className="text-2xl font-semibold text-white">国籍船员下船调度平台</h1>
+            <p className="text-sm text-slate-400">使用邮箱获取安全登录链接</p>
+          </div>
+          <form onSubmit={handleMagicLink} className="mt-6 space-y-4">
+            <div className="flex flex-col gap-2">
+              <label className="text-xs text-slate-400">邮箱</label>
+              <input
+                type="email"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                className="h-11 rounded-xl border border-white/10 bg-slate-950/60 px-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-400 focus:outline-none"
+                placeholder="you@example.com"
+              />
+            </div>
+            {authError && <p className="text-xs text-rose-300">{authError}</p>}
+            {authStatus === 'sent' && <p className="text-xs text-emerald-300">登录链接已发送，请检查邮箱。</p>}
+            <button
+              type="submit"
+              disabled={authStatus === 'sending'}
+              className="h-11 w-full rounded-xl bg-white text-sm font-semibold text-slate-900 transition hover:bg-slate-100 disabled:bg-white/50"
+            >
+              {authStatus === 'sending' ? '发送中...' : '发送登录链接'}
+            </button>
+          </form>
+          <p className="mt-6 text-center text-xs text-slate-500">
+            继续即表示同意 DockDay 安全登录流程
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (shareMode) {
     if (!shareVerified) {
       return (
@@ -1067,7 +1299,14 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-slate-950 overflow-auto p-6 relative">
         {mainContent}
         {shareMode === 'arrivals' && (
-          <ShipDetailModal ship={activeShip} onClose={() => setActiveShip(null)} />
+          <ShipDetailModal
+            ship={activeShip}
+            onClose={() => setActiveShip(null)}
+            onFollowShip={shareMode ? undefined : handleFollowShip}
+            followedSet={followedMmsiSet}
+            meta={activeShip ? followedMeta[activeShip.mmsi] : undefined}
+            onUpdateMeta={shareMode ? undefined : handleUpdateFollowMeta}
+          />
         )}
       </div>
     );
@@ -1079,7 +1318,14 @@ const App: React.FC = () => {
       
       <main className="flex-1 overflow-auto p-6 relative bg-slate-950">{mainContent}</main>
       {currentView !== 'workspace' && (!shareMode || shareMode === 'arrivals') && (
-        <ShipDetailModal ship={activeShip} onClose={() => setActiveShip(null)} />
+        <ShipDetailModal
+          ship={activeShip}
+          onClose={() => setActiveShip(null)}
+          onFollowShip={shareMode ? undefined : handleFollowShip}
+          followedSet={followedMmsiSet}
+          meta={activeShip ? followedMeta[activeShip.mmsi] : undefined}
+          onUpdateMeta={shareMode ? undefined : handleUpdateFollowMeta}
+        />
       )}
     </div>
   );

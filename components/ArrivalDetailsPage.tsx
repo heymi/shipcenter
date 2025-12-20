@@ -10,6 +10,8 @@ interface ArrivalDetailsPageProps {
   ships: Ship[];
   allShips: Ship[];
   onSelectShip: (ship: Ship) => void;
+  onFollowShip?: (ship: Ship) => void;
+  followedSet?: Set<string>;
   dockdayTargetSet?: Set<string>;
   dataUpdatedAt?: number | null;
   onShare?: () => void;
@@ -171,6 +173,8 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
   ships,
   allShips,
   onSelectShip,
+  onFollowShip,
+  followedSet,
   dockdayTargetSet,
   dataUpdatedAt,
   onShare,
@@ -362,6 +366,8 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
             const isPinnedCard = isShareMode && idx === 0;
             const isDockdayTarget = Boolean(dockdayTargetSet?.has(ship.mmsi));
             const hasTopBadge = isPinnedCard || isDockdayTarget;
+            const isFollowed = followedSet?.has(ship.mmsi) ?? false;
+            const followDisabled = !onFollowShip || isFollowed || isShareMode;
             return (
               <div
                 key={ship.mmsi}
@@ -414,6 +420,24 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
                     <p className="text-[10px] text-slate-500 font-mono">
                       MMSI {ship.mmsi} · 船籍 {ship.flag || '-'}
                     </p>
+                  </div>
+                  <div className="ml-auto">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!followDisabled && onFollowShip) onFollowShip(ship);
+                      }}
+                      disabled={followDisabled}
+                      className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        isFollowed
+                          ? 'border-emerald-500/40 text-emerald-200 cursor-not-allowed'
+                          : followDisabled
+                            ? 'border-white/10 text-white/30 cursor-not-allowed'
+                            : 'border-white/20 text-white/70 hover:text-white hover:border-white/40'
+                      }`}
+                    >
+                      {isFollowed ? '已关注' : '+关注'}
+                    </button>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-3 text-xs">
@@ -508,8 +532,8 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
                   </p>
                 </div>
               </div>
-                <div className="hidden md:flex items-end gap-3">
-                  <div className="flex flex-col items-center gap-1">
+              <div className="hidden md:flex items-end gap-3">
+                <div className="flex flex-col items-center gap-1">
                     <div className="relative w-3 h-12 rounded-full bg-gradient-to-b from-emerald-400 via-cyan-400 to-blue-900 overflow-hidden border border-slate-700">
                     {normalizedDraught !== null ? (
                       <>
@@ -544,7 +568,23 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
                     {hasDraught ? `${rawDraught!.toFixed(1)} m` : '-'}
                   </span>
                 </div>
-                <div className="flex items-center">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!followDisabled && onFollowShip) onFollowShip(ship);
+                    }}
+                    disabled={followDisabled}
+                    className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                      isFollowed
+                        ? 'border-emerald-500/40 text-emerald-200 cursor-not-allowed'
+                        : followDisabled
+                          ? 'border-white/10 text-white/30 cursor-not-allowed'
+                          : 'border-white/20 text-white/70 hover:text-white hover:border-white/40'
+                    }`}
+                  >
+                    {isFollowed ? '已关注' : '+关注'}
+                  </button>
                   <span className="p-2 rounded-full border border-white/20 text-white/70 bg-white/5">
                     <svg
                       className="w-4 h-4"
