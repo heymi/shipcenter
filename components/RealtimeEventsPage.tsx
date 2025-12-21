@@ -85,6 +85,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMessage, setBatchMessage] = useState<string | null>(null);
+  const [batchTotal, setBatchTotal] = useState<number | null>(null);
   const knownMmsiRef = useRef<Set<string>>(new Set());
   const autoQueueRef = useRef<Promise<void>>(Promise.resolve());
   const PAGE_SIZE = 15;
@@ -154,6 +155,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
       }
       if (!force && localStorage.getItem(batchOnceKey)) return;
       setBatchLoading(true);
+      setBatchTotal(null);
       setBatchMessage(null);
       try {
         const summary = await batchAnalyzeShipAi({
@@ -163,7 +165,12 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
           max_sources: 4,
           max_per_source: 1,
         });
-        setBatchMessage(`存量分析完成：${summary.analyzed} 已分析，${summary.skipped} 已存在`);
+        const total = summary.total ?? summary.analyzed + summary.skipped + summary.failed;
+        const failed = summary.failed ?? 0;
+        setBatchTotal(total);
+        setBatchMessage(
+          `存量分析完成：${summary.analyzed} 已分析，${summary.skipped} 已存在${failed ? `，${failed} 失败` : ''}`
+        );
         localStorage.setItem(batchOnceKey, String(Date.now()));
       } catch (err) {
         console.warn('批量 AI 分析失败', err);
@@ -182,6 +189,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
       return;
     }
     setBatchLoading(true);
+    setBatchTotal(null);
     setBatchMessage(null);
     try {
       const uniqueMmsi = new Set<string>();
@@ -189,14 +197,22 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
         const mmsi = normalizeMmsi(event.mmsi);
         if (mmsi) uniqueMmsi.add(mmsi);
       });
+      const totalCount = Math.max(1, uniqueMmsi.size || 1);
+      setBatchTotal(totalCount);
+      setBatchMessage(`当前动态待分析 ${totalCount} 艘`);
       const summary = await batchAnalyzeShipAi({
         scope: 'events',
         since_hours: sinceHours,
-        limit: Math.max(1, Math.min(200, uniqueMmsi.size || 1)),
+        limit: Math.max(1, Math.min(200, totalCount)),
         max_sources: 4,
         max_per_source: 1,
       });
-      setBatchMessage(`当前动态分析完成：${summary.analyzed} 已分析，${summary.skipped} 已存在`);
+      const total = summary.total ?? totalCount;
+      const failed = summary.failed ?? 0;
+      setBatchTotal(total);
+      setBatchMessage(
+        `当前动态分析完成：${summary.analyzed} 已分析，${summary.skipped} 已存在${failed ? `，${failed} 失败` : ''}`
+      );
     } catch (err) {
       console.warn('当前动态 AI 分析失败', err);
       setBatchMessage('当前动态分析失败，请稍后重试');
@@ -664,7 +680,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
                   }`}
                 >
                   {batchLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                  {batchLoading ? 'AI 批量中' : '存量 AI 分析'}
+                  {batchLoading ? `AI 批量中${batchTotal ? ` (${batchTotal})` : ''}` : '存量 AI 分析'}
                 </button>
                 <button
                   onClick={runFilteredBatchAnalysis}
