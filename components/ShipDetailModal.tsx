@@ -339,14 +339,14 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-6xl h-[92vh] bg-slate-950 border border-slate-800 rounded-t-3xl md:rounded-3xl shadow-[0_30px_80px_-35px_rgba(0,0,0,0.8)] overflow-hidden flex flex-col"
+        className="w-full max-w-6xl max-h-[92vh] bg-slate-950 border border-slate-800 rounded-t-3xl md:rounded-3xl shadow-[0_30px_80px_-35px_rgba(0,0,0,0.8)] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="px-6 py-5 border-b border-slate-800 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950">
+        <div className="px-4 sm:px-6 py-5 sm:py-6 space-y-6 text-slate-200 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             <div className="min-w-0 space-y-2">
               <p className="text-[10px] uppercase tracking-[0.4em] text-slate-500">DockDay</p>
-              <h2 className="text-2xl sm:text-3xl font-semibold text-white tracking-tight">
+              <h2 className="text-xl sm:text-3xl font-semibold text-white tracking-tight">
                 {ship.name}
               </h2>
               {ship.cnName && <p className="text-sm text-slate-400">{ship.cnName}</p>}
@@ -398,11 +398,9 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
             </div>
           </div>
           {ship.riskReason && (
-            <p className="mt-4 text-xs text-slate-400">风险提示：{ship.riskReason}</p>
+            <p className="text-xs text-slate-400">风险提示：{ship.riskReason}</p>
           )}
-        </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6 text-slate-200">
           <section className="space-y-4">
             <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
               <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">目的地</p>
@@ -412,7 +410,7 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
 
             <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
               <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">标准真实数据</p>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-slate-300 mt-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs text-slate-300 mt-3">
                 <div>
                   <p className="text-[10px] text-slate-500">船型</p>
                   <p className="text-sm text-white">{ship.type || '-'}</p>
@@ -475,7 +473,7 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
           </section>
 
           <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">AI 推测</p>
                 {aiUpdatedAt[String(ship.mmsi)] && (
@@ -801,7 +799,10 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
                 return <p className="text-xs text-slate-500 mt-2">暂无动态</p>;
               }
               return uniqEvents.slice(0, 8).map((event) => (
-                <div key={`${event.mmsi}-${event.event_type}-${event.detail}`} className="mt-3">
+                <div
+                  key={`${event.mmsi}-${event.event_type}-${event.detail}`}
+                  className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3"
+                >
                   <p className="text-sm text-slate-200">{event.detail}</p>
                   <p className="text-[11px] text-slate-500 mt-1">
                     {formatTimestamp(event.detected_at)}
