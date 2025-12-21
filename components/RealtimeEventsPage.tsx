@@ -175,6 +175,13 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
     [batchOnceKey, canRunAi]
   );
 
+  const shipLookup = useMemo(() => {
+    const map = new Map<string, Ship>();
+    const pool = allShips.length > 0 ? allShips : ships;
+    pool.forEach((ship) => map.set(ship.mmsi.toString(), ship));
+    return map;
+  }, [ships, allShips]);
+
   const enqueueAutoAnalyze = useCallback(
     (mmsiList: string[]) => {
       autoQueueRef.current = autoQueueRef.current.then(async () => {
@@ -225,13 +232,6 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
       setLoading(false);
     }
   }, []);
-
-  const shipLookup = useMemo(() => {
-    const map = new Map<string, Ship>();
-    const pool = allShips.length > 0 ? allShips : ships;
-    pool.forEach((ship) => map.set(ship.mmsi.toString(), ship));
-    return map;
-  }, [ships, allShips]);
 
   useEffect(() => {
     loadEvents();
