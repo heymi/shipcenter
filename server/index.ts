@@ -78,6 +78,20 @@ const getQueryNumber = (value: unknown): number | undefined => {
 const filterForeignShips = (ships: any[]) =>
   Array.isArray(ships) ? ships.filter((ship) => !isMainlandFlag(ship?.ship_flag || ship?.flag || '')) : [];
 
+app.get('/health', (_req, res) => {
+  const required = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+  const optional = ['SHIPXY_KEY', 'GEMINI_API_KEY', 'PORT_CODE', 'CORS_ORIGIN'];
+  const missingRequired = required.filter((key) => !process.env[key]);
+  const missingOptional = optional.filter((key) => !process.env[key]);
+  res.json({
+    status: missingRequired.length === 0 ? 0 : -1,
+    ok: missingRequired.length === 0,
+    missing_required: missingRequired,
+    missing_optional: missingOptional,
+    time: new Date().toISOString(),
+  });
+});
+
 const respondWithSnapshot = async (res: express.Response, port: string) => {
   const snapshot = await getLatestSnapshot(port);
   if (snapshot) {
