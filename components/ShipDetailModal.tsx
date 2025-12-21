@@ -23,6 +23,8 @@ interface ShipDetailModalProps {
   meta?: FollowedShipMeta | null;
   onUpdateMeta?: (mmsi: string, patch: Partial<FollowedShipMeta>) => Promise<void>;
   shareToken?: string | null;
+  variant?: 'modal' | 'page';
+  onBack?: () => void;
 }
 
 const parseBeijingDate = (value?: string) => {
@@ -128,8 +130,13 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
   meta,
   onUpdateMeta,
   shareToken,
+  variant = 'modal',
+  onBack,
 }) => {
   if (!ship) return null;
+  const isPage = variant === 'page';
+  const closeLabel = isPage ? '返回分享首页' : '关闭';
+  const handleClose = isPage ? onBack ?? onClose : onClose;
   const canEdit = Boolean(onUpdateMeta);
   const canTriggerAi = !shareToken;
   const rawDraught =
@@ -333,16 +340,8 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
     }
   };
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end md:items-center justify-center px-4 py-6 md:py-8 bg-slate-900/70 backdrop-blur"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-6xl max-h-[92vh] bg-slate-950 border border-slate-800 rounded-t-3xl md:rounded-3xl shadow-[0_30px_80px_-35px_rgba(0,0,0,0.8)] overflow-y-auto overscroll-contain"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="px-4 sm:px-6 py-5 sm:py-6 space-y-6 text-slate-200 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
+  const content = (
+    <div className="px-4 sm:px-6 py-5 sm:py-6 space-y-6 text-slate-200 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             <div className="min-w-0 space-y-2">
               <p className="text-[10px] uppercase tracking-[0.4em] text-slate-500">DockDay</p>
@@ -380,10 +379,10 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
                   {isFollowed ? '已关注' : '+关注'}
                 </button>
                 <button
-                  onClick={onClose}
+                  onClick={handleClose}
                   className="px-3.5 py-2 text-xs font-medium rounded-full border border-slate-700 text-slate-300 bg-slate-900/60 hover:text-white hover:border-slate-500 transition-colors"
                 >
-                  关闭
+                  {closeLabel}
                 </button>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
@@ -811,7 +810,29 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
               ));
             })()}
           </section>
+    </div>
+  );
+
+  if (isPage) {
+    return (
+      <div className="w-full max-w-6xl mx-auto">
+        <div className="bg-slate-950 border border-slate-800 rounded-3xl shadow-[0_30px_80px_-35px_rgba(0,0,0,0.8)] overflow-y-auto overscroll-contain">
+          {content}
         </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end md:items-center justify-center px-4 py-6 md:py-8 bg-slate-900/70 backdrop-blur"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-6xl max-h-[92vh] bg-slate-950 border border-slate-800 rounded-t-3xl md:rounded-3xl shadow-[0_30px_80px_-35px_rgba(0,0,0,0.8)] overflow-y-auto overscroll-contain"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {content}
       </div>
     </div>
   );

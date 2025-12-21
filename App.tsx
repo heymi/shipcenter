@@ -159,6 +159,7 @@ const App: React.FC = () => {
   const [shareVerified, setShareVerified] = useState(true);
   const [shareError, setShareError] = useState<string | null>(null);
   const [sharePasswordInput, setSharePasswordInput] = useState('');
+  const [shareSelectedMmsi, setShareSelectedMmsi] = useState<string | null>(null);
   const [activeShares, setActiveShares] = useState<Partial<Record<'arrivals' | 'workspace', { token: string }>>>({});
   const [shareModal, setShareModal] = useState<{ target: 'arrivals' | 'workspace'; url: string; password: string } | null>(null);
   const [shareRemoteMeta, setShareRemoteMeta] = useState<{
@@ -202,9 +203,11 @@ const App: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     const share = params.get('share');
     const key = params.get('key');
+    const mmsi = params.get('mmsi');
     if (share === 'arrivals' || share === 'workspace') {
       setShareMode(share);
       setShareToken(key);
+      setShareSelectedMmsi(share === 'arrivals' ? mmsi : null);
       if (share === 'arrivals') {
         setCurrentView('events');
         setEventsTab('arrivals');
@@ -215,6 +218,7 @@ const App: React.FC = () => {
       setShareMode(null);
       setShareToken(null);
       setShareVerified(true);
+      setShareSelectedMmsi(null);
     }
   }, []);
 
@@ -226,6 +230,46 @@ const App: React.FC = () => {
     setFollowOpsQueue([]);
     setFollowQueueBlocked(false);
   }, [session?.user?.id, authReady, shareMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handlePop = () => {
+      const params = new URLSearchParams(window.location.search);
+      const share = params.get('share');
+      if (share === 'arrivals') {
+        setShareSelectedMmsi(params.get('mmsi'));
+      } else {
+        setShareSelectedMmsi(null);
+      }
+    };
+    window.addEventListener('popstate', handlePop);
+    return () => window.removeEventListener('popstate', handlePop);
+  }, []);
+
+  const updateShareMmsiParam = useCallback((value: string | null) => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (value) {
+      url.searchParams.set('mmsi', value);
+    } else {
+      url.searchParams.delete('mmsi');
+    }
+    window.history.pushState({}, '', url.toString());
+  }, []);
+
+  const handleShareSelectShip = useCallback(
+    (ship: Ship) => {
+      const mmsi = String(ship.mmsi);
+      setShareSelectedMmsi(mmsi);
+      updateShareMmsiParam(mmsi);
+    },
+    [updateShareMmsiParam]
+  );
+
+  const handleShareBack = useCallback(() => {
+    setShareSelectedMmsi(null);
+    updateShareMmsiParam(null);
+  }, [updateShareMmsiParam]);
 
   useEffect(() => {
     let active = true;
@@ -250,6 +294,7 @@ const App: React.FC = () => {
       setSharePasswordInput('');
       setShareRemoteMeta(null);
       setShareMetaStatus('idle');
+      setShareSelectedMmsi(null);
       return;
     }
     if (!shareToken) {
@@ -1106,7 +1151,9 @@ const App: React.FC = () => {
           <RealtimeEventsPage
             ships={ships}
             allShips={allShips}
-            onSelectShip={(ship) => setActiveShip(ship)}
+            onSelectShip={
+              shareMode === 'arrivals' ? handleShareSelectShip : (ship) => setActiveShip(ship)
+            }
             onFollowShip={handleFollowShip}
             followedSet={followedMmsiSet}
             dockdayTargetSet={dockdayTargetSet}
@@ -1388,19 +1435,42 @@ const App: React.FC = () => {
       );
     }
 
+    const shareSelectedShip =
+      shareMode === 'arrivals' && shareSelectedMmsi
+        ? allShips.find((ship) => String(ship.mmsi) === String(shareSelectedMmsi)) ||
+          ships.find((ship) => String(ship.mmsi) === String(shareSelectedMmsi)) ||
+          null
+        : null;
+    const showShareDetail = shareMode === 'arrivals' && Boolean(shareSelectedMmsi);
+
     return (
       <div className="min-h-screen bg-slate-950 overflow-auto p-6 relative">
-        {mainContent}
-        {shareMode === 'arrivals' && (
-          <ShipDetailModal
-            ship={activeShip}
-            onClose={() => setActiveShip(null)}
-            onFollowShip={shareMode ? undefined : handleFollowShip}
-            followedSet={followedMmsiSet}
-            meta={activeShip ? followedMeta[activeShip.mmsi] : undefined}
-            onUpdateMeta={shareMode ? undefined : handleUpdateFollowMeta}
-            shareToken={shareToken}
-          />
+        {showShareDetail ? (
+          shareSelectedShip ? (
+            <ShipDetailModal
+              ship={shareSelectedShip}
+              onClose={handleShareBack}
+              onBack={handleShareBack}
+              onFollowShip={shareMode ? undefined : handleFollowShip}
+              followedSet={followedMmsiSet}
+              meta={shareSelectedShip ? followedMeta[shareSelectedShip.mmsi] : undefined}
+              onUpdateMeta={shareMode ? undefined : handleUpdateFollowMeta}
+              shareToken={shareToken}
+              variant="page"
+            />
+          ) : (
+            <div className="max-w-2xl mx-auto rounded-2xl border border-slate-800 bg-slate-900/60 p-6 text-slate-200">
+              <p className="text-sm text-slate-300">未找到该船舶信息，请返回分享首页重试。</p>
+              <button
+                onClick={handleShareBack}
+                className="mt-4 inline-flex items-center justify-center rounded-lg border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 hover:border-slate-500 hover:text-white"
+              >
+                返回分享首页
+              </button>
+            </div>
+          )
+        ) : (
+          mainContent
         )}
       </div>
     );
