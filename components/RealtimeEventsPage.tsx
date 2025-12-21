@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, RefreshCw } from 'lucide-react';
-import { fetchShipEvents } from '../api';
+import { autoAnalyzeShipWithAI, batchAnalyzeShipAi, fetchShipAiAnalysis, fetchShipEvents } from '../api';
 import { Ship, ShipEvent } from '../types';
 import { EVENT_ICON_META } from './eventMeta';
 import { isMainlandFlag } from '../utils/ship';
 import { getRiskBadgeClass, getRiskLabel } from '../utils/risk';
 import { ArrivalDetailsPage } from './ArrivalDetailsPage';
+import { supabase } from '../supabaseClient';
 
 interface RealtimeEventsPageProps {
   ships: Ship[];
@@ -82,7 +83,127 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   const [eventType, setEventType] = useState('ALL');
   const [page, setPage] = useState(1);
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchMessage, setBatchMessage] = useState<string | null>(null);
+  const knownMmsiRef = useRef<Set<string>>(new Set());
+  const autoQueueRef = useRef<Promise<void>>(Promise.resolve());
   const PAGE_SIZE = 15;
+  const batchOnceKey = 'dockday_ai_batch_events_v1';
+
+  const canRunAi = useCallback(async () => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      return Boolean(data?.session?.access_token);
+    } catch (err) {
+      console.warn('Failed to resolve auth session', err);
+      return false;
+    }
+  }, []);
+
+  const normalizeMmsi = useCallback((value: ShipEvent['mmsi']) => {
+    return String(value ?? '').replace(/\.0+$/, '').trim();
+  }, []);
+
+  const eventsByMmsi = useMemo(() => {
+    const map = new Map<string, ShipEvent[]>();
+    shipEvents.forEach((event) => {
+      const key = normalizeMmsi(event.mmsi);
+      if (!key) return;
+      const list = map.get(key) || [];
+      list.push(event);
+      map.set(key, list);
+    });
+    map.forEach((list) =>
+      list.sort((a, b) => (b.detected_at || 0) - (a.detected_at || 0))
+    );
+    return map;
+  }, [shipEvents, normalizeMmsi]);
+
+  const buildAiShipPayload = useCallback(
+    (ship: Ship | undefined, mmsi: string, fallbackFlag?: string) => ({
+      name: ship?.name,
+      mmsi: ship?.mmsi ?? mmsi,
+      imo: ship?.imo,
+      flag: ship?.flag || fallbackFlag,
+      type: ship?.type,
+      eta: ship?.eta,
+      etd: ship?.etd,
+      etaUtc: ship?.etaUtc,
+      lastTime: ship?.lastTime,
+      lastTimeUtc: ship?.lastTimeUtc,
+      dest: ship?.dest,
+      last_port: ship?.lastPort,
+      lastPort: ship?.lastPort,
+      dwt: ship?.dwt,
+      length: ship?.length,
+      width: ship?.width,
+      draught: ship?.draught,
+      agent: ship?.agent,
+      docStatus: ship?.docStatus,
+      riskReason: ship?.riskReason,
+    }),
+    []
+  );
+
+  const runBatchAnalysis = useCallback(
+    async (force = false) => {
+      const ok = await canRunAi();
+      if (!ok) {
+        setBatchMessage('请先登录后再执行 AI 分析');
+        return;
+      }
+      if (!force && localStorage.getItem(batchOnceKey)) return;
+      setBatchLoading(true);
+      setBatchMessage(null);
+      try {
+        const summary = await batchAnalyzeShipAi({
+          scope: 'events',
+          since_hours: EVENT_FETCH_HISTORY_HOURS,
+          limit: 30,
+          max_sources: 4,
+          max_per_source: 1,
+        });
+        setBatchMessage(`存量分析完成：${summary.analyzed} 已分析，${summary.skipped} 已存在`);
+        localStorage.setItem(batchOnceKey, String(Date.now()));
+      } catch (err) {
+        console.warn('批量 AI 分析失败', err);
+        setBatchMessage('存量分析失败，请稍后重试');
+      } finally {
+        setBatchLoading(false);
+      }
+    },
+    [batchOnceKey, canRunAi]
+  );
+
+  const enqueueAutoAnalyze = useCallback(
+    (mmsiList: string[]) => {
+      autoQueueRef.current = autoQueueRef.current.then(async () => {
+        const ok = await canRunAi();
+        if (!ok) return;
+        for (const mmsi of mmsiList) {
+          try {
+            const existing = await fetchShipAiAnalysis(mmsi);
+            if (existing.data) continue;
+            const ship = shipLookup.get(mmsi);
+            const relatedEvents = (eventsByMmsi.get(mmsi) || []).slice(0, 6);
+            await autoAnalyzeShipWithAI({
+              ship: buildAiShipPayload(ship, mmsi, relatedEvents[0]?.ship_flag),
+              events: relatedEvents.map((event) => ({
+                event_type: event.event_type,
+                detail: event.detail,
+                detected_at: event.detected_at,
+              })),
+              max_sources: 4,
+              max_per_source: 1,
+            });
+          } catch (err) {
+            console.warn('自动 AI 分析失败', err);
+          }
+        }
+      });
+    },
+    [buildAiShipPayload, canRunAi, eventsByMmsi, shipLookup]
+  );
 
   const loadEvents = useCallback(async () => {
     if (!import.meta.env.VITE_LOCAL_API) {
@@ -114,6 +235,25 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   useEffect(() => {
     setPage(1);
   }, [eventType, sinceHours]);
+
+  useEffect(() => {
+    if (shipEvents.length === 0) return;
+    const current = new Set<string>();
+    shipEvents.forEach((event) => {
+      const mmsi = normalizeMmsi(event.mmsi);
+      if (mmsi) current.add(mmsi);
+    });
+    if (knownMmsiRef.current.size === 0) {
+      knownMmsiRef.current = current;
+      void runBatchAnalysis(false);
+      return;
+    }
+    const newMmsi = Array.from(current).filter((mmsi) => !knownMmsiRef.current.has(mmsi));
+    if (newMmsi.length) {
+      newMmsi.forEach((mmsi) => knownMmsiRef.current.add(mmsi));
+      enqueueAutoAnalyze(newMmsi);
+    }
+  }, [enqueueAutoAnalyze, normalizeMmsi, runBatchAnalysis, shipEvents]);
 
   const shipLookup = useMemo(() => {
     const map = new Map<string, Ship>();
@@ -484,11 +624,24 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
                   {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                   {loading ? '刷新中' : '手动刷新'}
                 </button>
+                <button
+                  onClick={() => runBatchAnalysis(true)}
+                  disabled={batchLoading}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-full border ${
+                    batchLoading
+                      ? 'bg-slate-800 border-slate-700 text-slate-400 cursor-not-allowed'
+                      : 'border-emerald-400/50 text-emerald-100 hover:border-emerald-300 hover:text-white'
+                  }`}
+                >
+                  {batchLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  {batchLoading ? 'AI 批量中' : '存量 AI 分析'}
+                </button>
                 {lastRefreshAt && (
                   <span className="text-[11px] text-slate-500">
                     上次同步 {new Date(lastRefreshAt).toLocaleTimeString('zh-CN', { hour12: false })}
                   </span>
                 )}
+                {batchMessage && <span className="text-[11px] text-slate-500">{batchMessage}</span>}
               </div>
             )}
           </div>

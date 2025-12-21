@@ -578,6 +578,50 @@ export const autoAnalyzeShipWithAI = async (payload: {
   return data?.data || {};
 };
 
+export const batchAnalyzeShipAi = async (payload: {
+  scope?: 'events' | 'ships';
+  limit?: number;
+  since_hours?: number;
+  port?: string;
+  max_sources?: number;
+  max_per_source?: number;
+}): Promise<{
+  total: number;
+  analyzed: number;
+  skipped: number;
+  failed: number;
+  results: Array<{ mmsi: string; status: string; reason?: string }>;
+}> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/ai/ship-analysis/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    let msg = `ai batch analysis error ${resp.status}`;
+    try {
+      const errPayload = await resp.json();
+      if (errPayload?.msg) {
+        msg = String(errPayload.msg);
+      }
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(msg);
+  }
+  const data = await resp.json();
+  return {
+    total: data?.total ?? 0,
+    analyzed: data?.analyzed ?? 0,
+    skipped: data?.skipped ?? 0,
+    failed: data?.failed ?? 0,
+    results: Array.isArray(data?.results) ? data.results : [],
+  };
+};
+
 export const fetchShipAiAnalysis = async (mmsi: string): Promise<{
   data: ShipAiInference | null;
   updated_at?: number | null;

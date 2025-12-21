@@ -78,6 +78,8 @@ const getQueryNumber = (value: unknown): number | undefined => {
 const filterForeignShips = (ships: any[]) =>
   Array.isArray(ships) ? ships.filter((ship) => !isMainlandFlag(ship?.ship_flag || ship?.flag || '')) : [];
 
+const normalizeMmsi = (value: any) => String(value ?? '').replace(/\.0+$/, '').trim();
+
 app.get('/health', (_req, res) => {
   const required = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
   const optional = ['SHIPXY_KEY', 'GEMINI_API_KEY', 'PORT_CODE', 'CORS_ORIGIN'];
@@ -597,6 +599,219 @@ app.post('/ai/ship-analysis/auto', requireAuth, async (req, res) => {
       return res.status(400).json({ status: -1, msg: 'GEMINI_API_KEY missing' });
     }
     res.status(500).json({ status: -1, msg: 'AI auto analysis failed' });
+  }
+});
+
+app.post('/ai/ship-analysis/batch', requireAuth, async (req, res) => {
+  const userId = (req as AuthedRequest).userId;
+  if (!userId) return res.status(401).json({ status: -1, msg: 'unauthorized' });
+  const {
+    scope = 'events',
+    limit = 30,
+    since_hours = 24,
+    port,
+    max_sources = 4,
+    max_per_source = 1,
+  } = req.body || {};
+  const limitNumber = Math.max(1, Math.min(200, Number(limit) || 30));
+  const sinceHours = Number.isFinite(Number(since_hours)) ? Number(since_hours) : 24;
+  const portCode = (port || DEFAULT_PORT_CODE || '').toUpperCase();
+  const results: Array<{ mmsi: string; status: string; reason?: string }> = [];
+  let targets: any[] = [];
+  let eventsMap = new Map<string, any[]>();
+
+  try {
+    if (scope === 'ships') {
+      const snapshot = await getLatestSnapshot(portCode);
+      if (!snapshot) {
+        return res.status(400).json({ status: -1, msg: 'no snapshot cache found' });
+      }
+      const data = JSON.parse(snapshot.data_json || '[]');
+      targets = filterForeignShips(data);
+    } else {
+      const since = Date.now() - sinceHours * 3600 * 1000;
+      const rows = await getShipEvents(since, EVENTS_MAX_LIMIT);
+      rows
+        .filter((row) => !isMainlandFlag(row.ship_flag || ''))
+        .forEach((row) => {
+          const mmsi = normalizeMmsi(row.mmsi);
+          if (!mmsi) return;
+          const list = eventsMap.get(mmsi) || [];
+          list.push(row);
+          eventsMap.set(mmsi, list);
+        });
+      if (eventsMap.size === 0) {
+        return res.json({ status: 0, scope, total: 0, analyzed: 0, skipped: 0, failed: 0, results: [] });
+      }
+      let snapshotShips = new Map<string, any>();
+      const snapshot = await getLatestSnapshot(portCode);
+      if (snapshot) {
+        const data = JSON.parse(snapshot.data_json || '[]');
+        filterForeignShips(data).forEach((ship: any) => {
+          const mmsi = normalizeMmsi(ship.mmsi);
+          if (mmsi) snapshotShips.set(mmsi, ship);
+        });
+      }
+      targets = Array.from(eventsMap.keys()).map((mmsi) => {
+        const fallback = eventsMap.get(mmsi)?.[0];
+        return (
+          snapshotShips.get(mmsi) || {
+            mmsi,
+            ship_flag: fallback?.ship_flag || '',
+          }
+        );
+      });
+    }
+
+    const uniqueTargets: any[] = [];
+    const seen = new Set<string>();
+    for (const ship of targets) {
+      const mmsi = normalizeMmsi(ship?.mmsi);
+      if (!mmsi || seen.has(mmsi)) continue;
+      seen.add(mmsi);
+      uniqueTargets.push(ship);
+      if (uniqueTargets.length >= limitNumber) break;
+    }
+
+    let analyzed = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const ship of uniqueTargets) {
+      const mmsiValue = normalizeMmsi(ship?.mmsi);
+      if (!mmsiValue) continue;
+      try {
+        const existing = await getShipAiAnalysis(mmsiValue, userId);
+        if (existing?.analysis_json) {
+          skipped += 1;
+          results.push({ mmsi: mmsiValue, status: 'skipped' });
+          continue;
+        }
+        let historyNotes = '';
+        let historyEvents: any[] = [];
+        try {
+          const since = Date.now() - 90 * 24 * 3600 * 1000;
+          historyEvents = await getShipEventsByMmsi(mmsiValue, since, 60);
+          const followedMeta = await getFollowedShipMetaByMmsi(mmsiValue, userId);
+          if (historyEvents.length) {
+            const eventTypeCounts = historyEvents.reduce<Record<string, number>>((acc, item) => {
+              const key = item.event_type || 'UNKNOWN';
+              acc[key] = (acc[key] || 0) + 1;
+              return acc;
+            }, {});
+            const eventSummary = Object.entries(eventTypeCounts)
+              .map(([key, count]) => `${key}:${count}`)
+              .join('，');
+            let portSummary = '';
+            if (portCode) {
+              const portEvents = historyEvents.filter((item: any) => item.port_code === portCode);
+              if (portEvents.length) {
+                const portCounts = portEvents.reduce<Record<string, number>>((acc, item) => {
+                  const key = item.event_type || 'UNKNOWN';
+                  acc[key] = (acc[key] || 0) + 1;
+                  return acc;
+                }, {});
+                const portEventSummary = Object.entries(portCounts)
+                  .map(([key, count]) => `${key}:${count}`)
+                  .join('，');
+                portSummary = `\n南京港(${portCode})事件统计：${portEventSummary || '无'}`;
+              }
+            }
+            const lastRiskEvent = historyEvents.find((item) => item.event_type === 'RISK_CHANGE');
+            const recentLines = historyEvents
+              .slice(0, 8)
+              .map((item) => {
+                const ts = item.detected_at
+                  ? new Date(item.detected_at).toLocaleString('zh-CN', { hour12: false })
+                  : '时间未知';
+                const portTag = item.port_code ? `[${item.port_code}]` : '';
+                return `${ts} ${portTag} ${item.event_type || 'UNKNOWN'} ${item.detail || ''}`.trim();
+              })
+              .join('\n');
+            historyNotes = `近90天事件统计：${eventSummary || '无'}${portSummary}${lastRiskEvent?.detail ? `\n最近风险变化：${lastRiskEvent.detail}` : ''}\n最近事件：\n${recentLines}`;
+          }
+          if (followedMeta) {
+            const crewParts = [
+              followedMeta.crew_nationality ? `国籍 ${followedMeta.crew_nationality}` : '',
+              Number.isFinite(Number(followedMeta.crew_count)) ? `船员数 ${followedMeta.crew_count}` : '',
+              Number.isFinite(Number(followedMeta.expected_disembark_count))
+                ? `预计下船 ${followedMeta.expected_disembark_count}`
+                : '',
+              Number.isFinite(Number(followedMeta.actual_disembark_count))
+                ? `实际下船 ${followedMeta.actual_disembark_count}`
+                : '',
+              followedMeta.crew_income_level ? `收入 ${followedMeta.crew_income_level}` : '',
+              followedMeta.disembark_intent ? `下船意愿 ${followedMeta.disembark_intent}` : '',
+              followedMeta.email_status ? `邮件 ${followedMeta.email_status}` : '',
+              followedMeta.disembark_date ? `下船日期 ${followedMeta.disembark_date}` : '',
+            ].filter(Boolean);
+            const metaLines = [
+              followedMeta.berth ? `历史靠泊 ${followedMeta.berth}` : '',
+              followedMeta.cargo_type ? `货物类型 ${followedMeta.cargo_type}` : '',
+              crewParts.length ? `船员数据：${crewParts.join('，')}` : '',
+            ].filter(Boolean);
+            if (metaLines.length) {
+              historyNotes = `${historyNotes ? `${historyNotes}\n` : ''}历史跟进摘要：${metaLines.join('；')}`;
+            }
+          }
+        } catch (err) {
+          console.warn('读取历史事件失败', err);
+        }
+
+        const snippets = await fetchPublicSources(ship, {
+          maxSources: Number.isFinite(Number(max_sources)) ? Number(max_sources) : undefined,
+          maxPerSource: Number.isFinite(Number(max_per_source)) ? Number(max_per_source) : undefined,
+        });
+        const baseSourceNotes = snippets
+          .map((item) => `[${item.source}] ${item.title} - ${item.snippet}`)
+          .join('\n');
+        const sourceNotes = [baseSourceNotes, PORT_LOCAL_NOTES].filter(Boolean).join('\n');
+        const sourceLinks = snippets.map((item) => item.url);
+        const recentEvents = historyEvents
+          .slice(0, 6)
+          .map((item) => ({
+            event_type: item.event_type,
+            detail: item.detail,
+            detected_at: item.detected_at,
+          }));
+        const result = await runShipInference({
+          ship,
+          events: recentEvents,
+          source_notes: sourceNotes,
+          source_links: sourceLinks,
+          history_notes: historyNotes,
+        });
+        const merged = { ...result, citations: snippets };
+        await upsertShipAiAnalysis({
+          user_id: userId,
+          mmsi: mmsiValue,
+          analysis_json: JSON.stringify(merged || {}),
+          updated_at: Date.now(),
+        });
+        analyzed += 1;
+        results.push({ mmsi: mmsiValue, status: 'analyzed' });
+      } catch (err: any) {
+        failed += 1;
+        results.push({
+          mmsi: mmsiValue,
+          status: 'failed',
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    res.json({
+      status: 0,
+      scope,
+      total: uniqueTargets.length,
+      analyzed,
+      skipped,
+      failed,
+      results,
+    });
+  } catch (err: any) {
+    console.error('AI batch analysis failed', err);
+    res.status(500).json({ status: -1, msg: 'AI batch analysis failed' });
   }
 });
 
