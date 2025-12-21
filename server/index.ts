@@ -970,7 +970,7 @@ app.get('/share-links/:token/followed-ships', async (req, res) => {
     if (!row.active) {
       return res.status(410).json({ status: -1, msg: 'share inactive' });
     }
-    if (row.target !== 'workspace') {
+    if (row.target !== 'workspace' && row.target !== 'arrivals') {
       return res.status(400).json({ status: -1, msg: 'share target mismatch' });
     }
     if (!row.user_id) {
@@ -981,6 +981,47 @@ app.get('/share-links/:token/followed-ships', async (req, res) => {
   } catch (err) {
     console.error('读取分享关注列表失败', err);
     res.status(500).json({ status: -1, msg: '读取分享关注列表失败' });
+  }
+});
+
+app.get('/share-links/:token/ai-analysis/:mmsi', async (req, res) => {
+  const { token, mmsi } = req.params;
+  if (!token) return res.status(404).json({ status: -1, msg: 'token missing' });
+  if (!mmsi) return res.status(400).json({ status: -1, msg: 'mmsi required' });
+  try {
+    const row = await getShareLink(token.trim());
+    if (!row) {
+      return res.status(404).json({ status: -1, msg: 'share not found' });
+    }
+    if (!row.active) {
+      return res.status(410).json({ status: -1, msg: 'share inactive' });
+    }
+    if (row.target !== 'arrivals' && row.target !== 'workspace') {
+      return res.status(400).json({ status: -1, msg: 'share target mismatch' });
+    }
+    if (!row.user_id) {
+      return res.status(404).json({ status: -1, msg: 'share owner missing' });
+    }
+    const analysis = await getShipAiAnalysis(String(mmsi), row.user_id);
+    if (!analysis?.analysis_json) {
+      return res.json({ status: 0, data: null });
+    }
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(analysis.analysis_json);
+    } catch (err) {
+      console.warn('解析分享AI分析失败', err);
+      parsed = null;
+    }
+    res.json({
+      status: 0,
+      data: parsed,
+      updated_at: analysis.updated_at || null,
+      created_at: analysis.created_at || null,
+    });
+  } catch (err) {
+    console.error('读取分享AI分析失败', err);
+    res.status(500).json({ status: -1, msg: '读取分享AI分析失败' });
   }
 });
 

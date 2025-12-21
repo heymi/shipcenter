@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import type { FollowedShipMeta } from '../api';
 import {
   autoAnalyzeShipWithAI,
+  fetchSharedShipAiAnalysis,
   fetchShipAiAnalysis,
   fetchShipEvents,
   saveShipAiAnalysis,
@@ -17,6 +18,7 @@ interface ShipDetailModalProps {
   followedSet?: Set<string>;
   meta?: FollowedShipMeta | null;
   onUpdateMeta?: (mmsi: string, patch: Partial<FollowedShipMeta>) => Promise<void>;
+  shareToken?: string | null;
 }
 
 const parseBeijingDate = (value?: string) => {
@@ -113,9 +115,11 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
   followedSet,
   meta,
   onUpdateMeta,
+  shareToken,
 }) => {
   if (!ship) return null;
   const canEdit = Boolean(onUpdateMeta);
+  const canTriggerAi = !shareToken;
   const rawDraught =
     typeof ship.draught === 'number'
       ? ship.draught
@@ -148,7 +152,10 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
   useEffect(() => {
     if (!ship) return;
     let mounted = true;
-    fetchShipAiAnalysis(String(ship.mmsi))
+    const fetcher = shareToken
+      ? fetchSharedShipAiAnalysis(shareToken, String(ship.mmsi))
+      : fetchShipAiAnalysis(String(ship.mmsi));
+    fetcher
       .then((payload) => {
         if (!mounted) return;
         if (payload.data) {
@@ -190,6 +197,10 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
 
   const handleAutoAiInference = async () => {
     if (!ship) return;
+    if (!canTriggerAi) {
+      setAiError('分享页面不可更新 AI 分析');
+      return;
+    }
     setAiLoading(true);
     setAiError(null);
     try {
@@ -388,9 +399,9 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
               </div>
               <button
                 onClick={handleAutoAiInference}
-                disabled={aiLoading}
+                disabled={aiLoading || !canTriggerAi}
                 className={`px-3 py-2 rounded-full text-xs font-medium border transition ${
-                  aiLoading
+                  aiLoading || !canTriggerAi
                     ? 'border-slate-800 text-slate-500 cursor-not-allowed'
                     : 'border-emerald-400 text-white hover:bg-emerald-500/10'
                 }`}

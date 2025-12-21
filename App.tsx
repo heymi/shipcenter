@@ -642,7 +642,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const loadFollowed = async () => {
-      if (shareMode === 'workspace') {
+      if (shareMode === 'workspace' || shareMode === 'arrivals') {
         if (!shareVerified) {
           setFollowQueueBlocked(true);
           return;
@@ -1399,6 +1399,7 @@ const App: React.FC = () => {
             followedSet={followedMmsiSet}
             meta={activeShip ? followedMeta[activeShip.mmsi] : undefined}
             onUpdateMeta={shareMode ? undefined : handleUpdateFollowMeta}
+            shareToken={shareToken}
           />
         )}
       </div>
@@ -1418,6 +1419,7 @@ const App: React.FC = () => {
           followedSet={followedMmsiSet}
           meta={activeShip ? followedMeta[activeShip.mmsi] : undefined}
           onUpdateMeta={shareMode ? undefined : handleUpdateFollowMeta}
+          shareToken={shareMode === 'arrivals' ? shareToken : null}
         />
       )}
     </div>

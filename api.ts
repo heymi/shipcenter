@@ -345,6 +345,29 @@ export const fetchSharedFollowedShips = async (shareToken: string): Promise<Foll
   }
 };
 
+export const fetchSharedShipAiAnalysis = async (
+  shareToken: string,
+  mmsi: string
+): Promise<{
+  data: ShipAiInference | null;
+  updated_at?: number | null;
+  created_at?: number | null;
+}> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const resp = await fetch(
+    `${base}/share-links/${encodeURIComponent(shareToken)}/ai-analysis/${encodeURIComponent(mmsi)}`,
+    { headers: { Accept: 'application/json' } }
+  );
+  if (!resp.ok) throw new Error(`share ai analysis fetch error ${resp.status}`);
+  const payload = await resp.json();
+  return {
+    data: payload?.data || null,
+    updated_at: payload?.updated_at ?? null,
+    created_at: payload?.created_at ?? null,
+  };
+};
+
 export const upsertFollowedShip = async (meta: FollowedShipMeta) => {
   const base = getLocalBase();
   if (!base) throw new Error('Local API not configured');
