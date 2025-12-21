@@ -175,6 +175,36 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
     [batchOnceKey, canRunAi]
   );
 
+  const runFilteredBatchAnalysis = useCallback(async () => {
+    const ok = await canRunAi();
+    if (!ok) {
+      setBatchMessage('请先登录后再执行 AI 分析');
+      return;
+    }
+    setBatchLoading(true);
+    setBatchMessage(null);
+    try {
+      const uniqueMmsi = new Set<string>();
+      shipEvents.forEach((event) => {
+        const mmsi = normalizeMmsi(event.mmsi);
+        if (mmsi) uniqueMmsi.add(mmsi);
+      });
+      const summary = await batchAnalyzeShipAi({
+        scope: 'events',
+        since_hours: sinceHours,
+        limit: Math.max(1, Math.min(200, uniqueMmsi.size || 1)),
+        max_sources: 4,
+        max_per_source: 1,
+      });
+      setBatchMessage(`当前动态分析完成：${summary.analyzed} 已分析，${summary.skipped} 已存在`);
+    } catch (err) {
+      console.warn('当前动态 AI 分析失败', err);
+      setBatchMessage('当前动态分析失败，请稍后重试');
+    } finally {
+      setBatchLoading(false);
+    }
+  }, [canRunAi, normalizeMmsi, shipEvents, sinceHours]);
+
   const shipLookup = useMemo(() => {
     const map = new Map<string, Ship>();
     const pool = allShips.length > 0 ? allShips : ships;
@@ -635,6 +665,18 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
                 >
                   {batchLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
                   {batchLoading ? 'AI 批量中' : '存量 AI 分析'}
+                </button>
+                <button
+                  onClick={runFilteredBatchAnalysis}
+                  disabled={batchLoading || shipEvents.length === 0}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-full border ${
+                    batchLoading || shipEvents.length === 0
+                      ? 'bg-slate-800 border-slate-700 text-slate-400 cursor-not-allowed'
+                      : 'border-blue-400/50 text-blue-100 hover:border-blue-300 hover:text-white'
+                  }`}
+                >
+                  {batchLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  当前动态 AI 分析
                 </button>
                 {lastRefreshAt && (
                   <span className="text-[11px] text-slate-500">
