@@ -9,6 +9,10 @@ import {
   getShipEventsByMmsi,
   getFollowedShipMetaByMmsi,
   getShipAiAnalysis,
+  listShipConfirmedFields,
+  upsertShipConfirmedField,
+  deleteShipConfirmedField,
+  saveShipAiFeedback,
   getShareLink,
   listFollowedShips,
   listDailyAggregates,
@@ -79,6 +83,44 @@ const filterForeignShips = (ships: any[]) =>
   Array.isArray(ships) ? ships.filter((ship) => !isMainlandFlag(ship?.ship_flag || ship?.flag || '')) : [];
 
 const normalizeMmsi = (value: any) => String(value ?? '').replace(/\.0+$/, '').trim();
+
+const mapConfirmedOverrides = (rows: Array<{ field_key?: string; field_value?: string | null }>) => {
+  const overrides: Record<string, string> = {};
+  rows.forEach((row) => {
+    const key = String(row.field_key || '').trim();
+    const value = row.field_value ? String(row.field_value).trim() : '';
+    if (!key || !value) return;
+    overrides[key] = value;
+  });
+  return overrides;
+};
+
+const applyConfirmedOverrides = (result: any, overrides: Record<string, string>) => {
+  if (!result || typeof result !== 'object') return result;
+  const fieldMap: Record<string, string> = {
+    cargo_type: 'cargo_type_guess',
+    berth: 'berth_guess',
+    agent: 'agent_guess',
+    crew_nationality: 'crew_nationality_guess',
+    crew_count: 'crew_count_guess',
+  };
+  Object.entries(fieldMap).forEach(([key, target]) => {
+    const value = overrides[key];
+    if (!value) return;
+    const block = result[target] || {};
+    const numericValue = key === 'crew_count' ? Number(value) : value;
+    result[target] = {
+      ...block,
+      value: key === 'crew_count' && Number.isFinite(numericValue) ? numericValue : value,
+      confidence: 'high',
+      confidence_pct: 95,
+      rationale: Array.from(
+        new Set([...(block.rationale || []), '人工确认'])
+      ),
+    };
+  });
+  return result;
+};
 
 app.get('/health', (_req, res) => {
   const required = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
@@ -462,22 +504,33 @@ app.post('/ai/ship-analysis', requireAuth, async (req, res) => {
       .map((value) => value.trim())
       .filter(Boolean)
       .join('\n');
+    let confirmedOverrides: Record<string, string> = {};
+    if (userId && ship?.mmsi) {
+      try {
+        const confirmedRows = await listShipConfirmedFields(String(ship.mmsi), userId);
+        confirmedOverrides = mapConfirmedOverrides(confirmedRows);
+      } catch (err) {
+        console.warn('读取已确认字段失败', err);
+      }
+    }
     const result = await runShipInference({
       ship,
       events: Array.isArray(events) ? events : [],
       source_notes: mergedSourceNotes,
       source_links: Array.isArray(source_links) ? source_links : [],
       history_notes: historyNotes,
+      confirmed_overrides: confirmedOverrides,
     });
+    const mergedResult = applyConfirmedOverrides(result || {}, confirmedOverrides);
     if (userId && ship?.mmsi) {
       await upsertShipAiAnalysis({
         user_id: userId,
         mmsi: String(ship.mmsi),
-        analysis_json: JSON.stringify(result || {}),
+        analysis_json: JSON.stringify(mergedResult || {}),
         updated_at: Date.now(),
       });
     }
-    res.json({ status: 0, data: result });
+    res.json({ status: 0, data: mergedResult });
   } catch (err: any) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('AI analysis failed', err);
@@ -575,14 +628,24 @@ app.post('/ai/ship-analysis/auto', requireAuth, async (req, res) => {
       .join('\n');
     const sourceNotes = [baseSourceNotes, PORT_LOCAL_NOTES].filter(Boolean).join('\n');
     const sourceLinks = snippets.map((item) => item.url);
+    let confirmedOverrides: Record<string, string> = {};
+    if (userId && ship?.mmsi) {
+      try {
+        const confirmedRows = await listShipConfirmedFields(String(ship.mmsi), userId);
+        confirmedOverrides = mapConfirmedOverrides(confirmedRows);
+      } catch (err) {
+        console.warn('读取已确认字段失败', err);
+      }
+    }
     const result = await runShipInference({
       ship,
       events: Array.isArray(events) ? events : [],
       source_notes: sourceNotes,
       source_links: sourceLinks,
       history_notes: historyNotes,
+      confirmed_overrides: confirmedOverrides,
     });
-    const merged = { ...result, citations: snippets };
+    const merged = applyConfirmedOverrides({ ...result, citations: snippets }, confirmedOverrides);
     if (userId && ship?.mmsi) {
       await upsertShipAiAnalysis({
         user_id: userId,
@@ -774,14 +837,22 @@ app.post('/ai/ship-analysis/batch', requireAuth, async (req, res) => {
             detail: item.detail,
             detected_at: item.detected_at,
           }));
+        let confirmedOverrides: Record<string, string> = {};
+        try {
+          const confirmedRows = await listShipConfirmedFields(mmsiValue, userId);
+          confirmedOverrides = mapConfirmedOverrides(confirmedRows);
+        } catch (err) {
+          console.warn('读取已确认字段失败', err);
+        }
         const result = await runShipInference({
           ship,
           events: recentEvents,
           source_notes: sourceNotes,
           source_links: sourceLinks,
           history_notes: historyNotes,
+          confirmed_overrides: confirmedOverrides,
         });
-        const merged = { ...result, citations: snippets };
+        const merged = applyConfirmedOverrides({ ...result, citations: snippets }, confirmedOverrides);
         await upsertShipAiAnalysis({
           user_id: userId,
           mmsi: mmsiValue,
@@ -1022,6 +1093,101 @@ app.get('/share-links/:token/ai-analysis/:mmsi', async (req, res) => {
   } catch (err) {
     console.error('读取分享AI分析失败', err);
     res.status(500).json({ status: -1, msg: '读取分享AI分析失败' });
+  }
+});
+
+app.get('/share-links/:token/confirmed-fields/:mmsi', async (req, res) => {
+  const { token, mmsi } = req.params;
+  if (!token) return res.status(404).json({ status: -1, msg: 'token missing' });
+  if (!mmsi) return res.status(400).json({ status: -1, msg: 'mmsi required' });
+  try {
+    const row = await getShareLink(token.trim());
+    if (!row) {
+      return res.status(404).json({ status: -1, msg: 'share not found' });
+    }
+    if (!row.active) {
+      return res.status(410).json({ status: -1, msg: 'share inactive' });
+    }
+    if (row.target !== 'arrivals' && row.target !== 'workspace') {
+      return res.status(400).json({ status: -1, msg: 'share target mismatch' });
+    }
+    if (!row.user_id) {
+      return res.status(404).json({ status: -1, msg: 'share owner missing' });
+    }
+    const rows = await listShipConfirmedFields(String(mmsi), row.user_id);
+    res.json(rows);
+  } catch (err) {
+    console.error('读取分享已确认字段失败', err);
+    res.status(500).json({ status: -1, msg: '读取分享已确认字段失败' });
+  }
+});
+
+app.get('/ship-confirmed-fields/:mmsi', requireAuth, async (req, res) => {
+  const { mmsi } = req.params;
+  if (!mmsi) return res.status(400).json({ status: -1, msg: 'mmsi required' });
+  const userId = (req as AuthedRequest).userId;
+  if (!userId) return res.status(401).json({ status: -1, msg: 'unauthorized' });
+  try {
+    const rows = await listShipConfirmedFields(String(mmsi), userId);
+    res.json(rows);
+  } catch (err) {
+    console.error('读取已确认字段失败', err);
+    res.status(500).json({ status: -1, msg: '读取已确认字段失败' });
+  }
+});
+
+app.post('/ship-confirmed-fields/:mmsi', requireAuth, async (req, res) => {
+  const { mmsi } = req.params;
+  if (!mmsi) return res.status(400).json({ status: -1, msg: 'mmsi required' });
+  const userId = (req as AuthedRequest).userId;
+  if (!userId) return res.status(401).json({ status: -1, msg: 'unauthorized' });
+  const fieldKey = String(req.body?.field_key || '').trim();
+  const fieldValue = String(req.body?.field_value || '').trim();
+  const source = String(req.body?.source || 'manual').trim();
+  const aiValue = req.body?.ai_value ? String(req.body.ai_value) : null;
+  const confidencePct =
+    typeof req.body?.confidence_pct === 'number' ? Math.round(req.body.confidence_pct) : null;
+  if (!fieldKey || !fieldValue) {
+    return res.status(400).json({ status: -1, msg: 'field_key and field_value required' });
+  }
+  try {
+    await upsertShipConfirmedField({
+      user_id: userId,
+      mmsi: String(mmsi),
+      field_key: fieldKey,
+      field_value: fieldValue,
+      source,
+      updated_at: Date.now(),
+    });
+    await saveShipAiFeedback({
+      user_id: userId,
+      mmsi: String(mmsi),
+      field_key: fieldKey,
+      ai_value: aiValue,
+      corrected_value: fieldValue,
+      confidence_pct: Number.isFinite(confidencePct) ? confidencePct : null,
+      created_at: Date.now(),
+    });
+    res.json({ status: 0, msg: 'ok' });
+  } catch (err) {
+    console.error('保存已确认字段失败', err);
+    res.status(500).json({ status: -1, msg: '保存已确认字段失败' });
+  }
+});
+
+app.delete('/ship-confirmed-fields/:mmsi/:field_key', requireAuth, async (req, res) => {
+  const { mmsi, field_key } = req.params;
+  if (!mmsi || !field_key) {
+    return res.status(400).json({ status: -1, msg: 'mmsi and field_key required' });
+  }
+  const userId = (req as AuthedRequest).userId;
+  if (!userId) return res.status(401).json({ status: -1, msg: 'unauthorized' });
+  try {
+    await deleteShipConfirmedField(userId, String(mmsi), String(field_key));
+    res.json({ status: 0, msg: 'ok' });
+  } catch (err) {
+    console.error('删除已确认字段失败', err);
+    res.status(500).json({ status: -1, msg: '删除已确认字段失败' });
   }
 });
 

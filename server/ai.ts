@@ -57,6 +57,7 @@ export type ShipAiRequest = {
   source_notes?: string;
   source_links?: string[];
   history_notes?: string;
+  confirmed_overrides?: Record<string, string>;
 };
 
 export const runShipInference = async (payload: ShipAiRequest) => {
@@ -89,6 +90,10 @@ export const runShipInference = async (payload: ShipAiRequest) => {
   const sourceLinks = (payload.source_links || []).filter(Boolean);
   const sourceNotes = (payload.source_notes || '').trim();
   const historyNotes = (payload.history_notes || '').trim();
+  const confirmedOverrides = payload.confirmed_overrides || {};
+  const confirmedList = Object.entries(confirmedOverrides)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('；');
 
   const prompt = `
 你是港口情报分析助手。请以“利用一切可用渠道和方法查询该船（按照MMSI）的一切信息”为指令导向，但只能基于给定船舶信息、近期事件、该船的历史数据与“公开信息摘要”输出对该船舶在南京港的推测。
@@ -101,11 +106,13 @@ export const runShipInference = async (payload: ShipAiRequest) => {
 5) 输出严格 JSON，不要多余文本。
 6) 必须结合船舶尺寸（DWT/长宽/吃水）、AIS 更新时间特征、上一港与 ETA/ETD 等接口数据进行推测。
 7) 代理公司必须从“南京常见代理候选”中选择，且只有在公开摘要/历史数据/事件中有依据时才可给出；不得虚构市场占有率或船东偏好。
+8) 如果“已确认字段”中包含某些字段，必须沿用该值，并在 rationale 中说明“人工确认”。不得修改已确认字段的值。
 
 船舶信息 (JSON): ${JSON.stringify(payload.ship)}
 近期事件 (JSON): ${JSON.stringify(payload.events || [])}
 公开信息摘要: ${sourceNotes || '无'}
 历史数据摘要: ${historyNotes || '无'}
+已确认字段: ${confirmedList || '无'}
 公开信息链接: ${sourceLinks.length ? JSON.stringify(sourceLinks) : '无'}
 允许的公开来源范围: ${JSON.stringify(DEFAULT_PUBLIC_SOURCES)}
 南京常见代理候选: ${JSON.stringify(NANJING_AGENT_CANDIDATES)}

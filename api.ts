@@ -345,6 +345,97 @@ export const fetchSharedFollowedShips = async (shareToken: string): Promise<Foll
   }
 };
 
+export const fetchShipConfirmedFields = async (
+  mmsi: string
+): Promise<
+  Array<{
+    field_key: string;
+    field_value: string | null;
+    source?: string | null;
+    note?: string | null;
+    updated_at?: number | null;
+    created_at?: number | null;
+  }>
+> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/ship-confirmed-fields/${encodeURIComponent(mmsi)}`, {
+    headers: { Accept: 'application/json', ...authHeaders },
+  });
+  if (!resp.ok) throw new Error(`confirmed-fields error ${resp.status}`);
+  const payload = await resp.json();
+  return Array.isArray(payload) ? payload : [];
+};
+
+export const saveShipConfirmedField = async (
+  mmsi: string,
+  payload: {
+    field_key: string;
+    field_value: string;
+    source?: string;
+    ai_value?: string | null;
+    confidence_pct?: number | null;
+  }
+) => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(`${base}/ship-confirmed-fields/${encodeURIComponent(mmsi)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    let msg = `confirmed-fields save error ${resp.status}`;
+    try {
+      const errPayload = await resp.json();
+      if (errPayload?.msg) msg = String(errPayload.msg);
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
+};
+
+export const deleteShipConfirmedField = async (mmsi: string, fieldKey: string) => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const authHeaders = await getAuthHeaders();
+  const resp = await fetch(
+    `${base}/ship-confirmed-fields/${encodeURIComponent(mmsi)}/${encodeURIComponent(fieldKey)}`,
+    {
+      method: 'DELETE',
+      headers: { Accept: 'application/json', ...authHeaders },
+    }
+  );
+  if (!resp.ok) throw new Error(`confirmed-fields delete error ${resp.status}`);
+};
+
+export const fetchSharedShipConfirmedFields = async (
+  shareToken: string,
+  mmsi: string
+): Promise<
+  Array<{
+    field_key: string;
+    field_value: string | null;
+    source?: string | null;
+    note?: string | null;
+    updated_at?: number | null;
+    created_at?: number | null;
+  }>
+> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const resp = await fetch(
+    `${base}/share-links/${encodeURIComponent(shareToken)}/confirmed-fields/${encodeURIComponent(mmsi)}`,
+    { headers: { Accept: 'application/json' } }
+  );
+  if (!resp.ok) throw new Error(`share confirmed-fields error ${resp.status}`);
+  const payload = await resp.json();
+  return Array.isArray(payload) ? payload : [];
+};
+
 export const fetchSharedShipAiAnalysis = async (
   shareToken: string,
   mmsi: string

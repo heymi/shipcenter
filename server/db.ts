@@ -47,6 +47,29 @@ type ShipAiAnalysisRow = {
   updated_at: number;
 };
 
+type ShipConfirmedFieldRow = {
+  id?: number;
+  user_id: string;
+  mmsi: string;
+  field_key: string;
+  field_value: string | null;
+  source?: string | null;
+  note?: string | null;
+  created_at?: number;
+  updated_at: number;
+};
+
+type ShipAiFeedbackRow = {
+  id?: number;
+  user_id: string;
+  mmsi: string;
+  field_key: string;
+  ai_value?: string | null;
+  corrected_value?: string | null;
+  confidence_pct?: number | null;
+  created_at: number;
+};
+
 type FollowedShipRow = {
   user_id: string;
   mmsi: string;
@@ -196,6 +219,42 @@ export const getShipAiAnalysis = async (mmsi: string, userId: string) => {
     .limit(1);
   if (error) throw error;
   return data?.[0] ?? null;
+};
+
+export const listShipConfirmedFields = async (mmsi: string, userId: string) => {
+  const client = getClient();
+  const { data, error } = await client
+    .from('ship_confirmed_fields')
+    .select('field_key, field_value, source, note, updated_at, created_at')
+    .eq('user_id', userId)
+    .eq('mmsi', mmsi);
+  if (error) throw error;
+  return data ?? [];
+};
+
+export const upsertShipConfirmedField = async (row: ShipConfirmedFieldRow) => {
+  const client = getClient();
+  const { error } = await client.from('ship_confirmed_fields').upsert(row, {
+    onConflict: 'user_id,mmsi,field_key',
+  });
+  if (error) throw error;
+};
+
+export const deleteShipConfirmedField = async (userId: string, mmsi: string, fieldKey: string) => {
+  const client = getClient();
+  const { error } = await client
+    .from('ship_confirmed_fields')
+    .delete()
+    .eq('user_id', userId)
+    .eq('mmsi', mmsi)
+    .eq('field_key', fieldKey);
+  if (error) throw error;
+};
+
+export const saveShipAiFeedback = async (row: ShipAiFeedbackRow) => {
+  const client = getClient();
+  const { error } = await client.from('ship_ai_feedback').insert(row);
+  if (error) throw error;
 };
 
 export const upsertShipAiAnalysis = async (row: ShipAiAnalysisRow) => {
