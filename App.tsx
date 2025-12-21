@@ -171,6 +171,8 @@ const App: React.FC = () => {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authMode, setAuthMode] = useState<'magic' | 'password'>('magic');
   const [authStatus, setAuthStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [authError, setAuthError] = useState<string | null>(null);
   const authAllowlist = useMemo(() => {
@@ -406,6 +408,42 @@ const App: React.FC = () => {
       setAuthStatus('sent');
     },
     [authEmail, authAllowlist]
+  );
+
+  const handlePasswordLogin = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      const email = authEmail.trim();
+      const password = authPassword.trim();
+      if (!email) {
+        setAuthError('请输入邮箱地址');
+        setAuthStatus('error');
+        return;
+      }
+      if (!password) {
+        setAuthError('请输入登录密码');
+        setAuthStatus('error');
+        return;
+      }
+      if (authAllowlist.length && !isEmailAllowed(email, authAllowlist)) {
+        setAuthError('该邮箱不在白名单内，请联系 Dockday 官方人员');
+        setAuthStatus('error');
+        return;
+      }
+      setAuthStatus('sending');
+      setAuthError(null);
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (error) {
+        setAuthStatus('error');
+        setAuthError(error.message || '登录失败，请稍后重试');
+        return;
+      }
+      setAuthStatus('sent');
+    },
+    [authEmail, authAllowlist, authPassword]
   );
 
   const handleLogout = useCallback(async () => {
@@ -1218,9 +1256,43 @@ const App: React.FC = () => {
           <div className="space-y-2 text-center">
             <p className="text-xs uppercase tracking-[0.35em] text-slate-400">DockDay</p>
             <h1 className="text-2xl font-semibold text-white">国籍船员下船调度平台</h1>
-            <p className="text-sm text-slate-400">使用邮箱获取安全登录链接</p>
+            <p className="text-sm text-slate-400">
+              {authMode === 'magic' ? '使用邮箱获取安全登录链接' : '使用邮箱密码安全登录'}
+            </p>
           </div>
-          <form onSubmit={handleMagicLink} className="mt-6 space-y-4">
+          <div className="mt-6 grid grid-cols-2 gap-2 rounded-full border border-white/10 bg-slate-950/70 p-1 text-xs font-medium text-slate-400">
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('magic');
+                setAuthStatus('idle');
+                setAuthError(null);
+              }}
+              className={`rounded-full px-3 py-2 transition ${
+                authMode === 'magic'
+                  ? 'bg-white text-slate-900'
+                  : 'hover:text-white'
+              }`}
+            >
+              邮箱链接
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('password');
+                setAuthStatus('idle');
+                setAuthError(null);
+              }}
+              className={`rounded-full px-3 py-2 transition ${
+                authMode === 'password'
+                  ? 'bg-white text-slate-900'
+                  : 'hover:text-white'
+              }`}
+            >
+              邮箱密码
+            </button>
+          </div>
+          <form onSubmit={authMode === 'magic' ? handleMagicLink : handlePasswordLogin} className="mt-6 space-y-4">
             <div className="flex flex-col gap-2">
               <label className="text-xs text-slate-400">邮箱</label>
               <input
@@ -1231,14 +1303,35 @@ const App: React.FC = () => {
                 placeholder="you@example.com"
               />
             </div>
+            {authMode === 'password' && (
+              <div className="flex flex-col gap-2">
+                <label className="text-xs text-slate-400">密码</label>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  className="h-11 rounded-xl border border-white/10 bg-slate-950/60 px-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-400 focus:outline-none"
+                  placeholder="请输入密码"
+                />
+              </div>
+            )}
             {authError && <p className="text-xs text-rose-300">{authError}</p>}
-            {authStatus === 'sent' && <p className="text-xs text-emerald-300">登录链接已发送，请检查邮箱。</p>}
+            {authStatus === 'sent' && authMode === 'magic' && (
+              <p className="text-xs text-emerald-300">登录链接已发送，请检查邮箱。</p>
+            )}
+            {authStatus === 'sent' && authMode === 'password' && (
+              <p className="text-xs text-emerald-300">登录成功，正在跳转…</p>
+            )}
             <button
               type="submit"
               disabled={authStatus === 'sending'}
               className="h-11 w-full rounded-xl bg-white text-sm font-semibold text-slate-900 transition hover:bg-slate-100 disabled:bg-white/50"
             >
-              {authStatus === 'sending' ? '发送中...' : '发送登录链接'}
+              {authStatus === 'sending'
+                ? '处理中...'
+                : authMode === 'magic'
+                  ? '发送登录链接'
+                  : '登录'}
             </button>
           </form>
           <p className="mt-6 text-center text-xs text-slate-500">
