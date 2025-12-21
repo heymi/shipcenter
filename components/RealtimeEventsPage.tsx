@@ -226,6 +226,13 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
     }
   }, []);
 
+  const shipLookup = useMemo(() => {
+    const map = new Map<string, Ship>();
+    const pool = allShips.length > 0 ? allShips : ships;
+    pool.forEach((ship) => map.set(ship.mmsi.toString(), ship));
+    return map;
+  }, [ships, allShips]);
+
   useEffect(() => {
     loadEvents();
     const interval = setInterval(loadEvents, 5 * 60 * 1000);
@@ -254,13 +261,6 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
       enqueueAutoAnalyze(newMmsi);
     }
   }, [enqueueAutoAnalyze, normalizeMmsi, runBatchAnalysis, shipEvents]);
-
-  const shipLookup = useMemo(() => {
-    const map = new Map<string, Ship>();
-    const pool = allShips.length > 0 ? allShips : ships;
-    pool.forEach((ship) => map.set(ship.mmsi.toString(), ship));
-    return map;
-  }, [ships, allShips]);
 
   const filteredEvents = useMemo(() => {
     return shipEvents.filter((event) => {
