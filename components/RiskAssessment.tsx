@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Ship, RiskLevel } from '../types';
 import { AlertOctagon, AlertTriangle, ShieldCheck, Search, Filter, Map, History, X } from 'lucide-react';
+import { formatPortWithCountry } from '../utils/port';
 import { ShipDetailModal } from './ShipDetailModal';
 
 interface RiskAssessmentProps {
@@ -63,13 +64,13 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ ships }) => {
     const checkpoints = [-48, -24, -6, 0]; // hours relative to ETA
     return checkpoints.map((offset, idx) => {
       const ts = new Date(eta.getTime() + offset * 60 * 60 * 1000);
-      const labelMap = ['上一港离港', '途中检查', '锚地等待', '预计靠泊'];
+      const labelMap = ['出发港离港', '途中检查', '锚地等待', '预计靠泊'];
       const statusMap = ['离港确认', 'AIS 正常', '待引航', '入港排队'];
       return {
         label: labelMap[idx] || `节点 ${idx + 1}`,
         status: statusMap[idx] || '监控中',
         time: ts,
-        port: idx === 0 ? activeShip.lastPort : '长江航道',
+        port: idx === 0 ? formatPortWithCountry(activeShip.lastPort) : '长江航道',
       };
     });
   }, [activeShip, panelMode]);
@@ -119,7 +120,9 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ ships }) => {
                 </td>
                 <td className="px-6 py-4">
                   <div className="font-medium text-slate-900">{ship.name}</div>
-                  <div className="text-xs text-slate-500 font-mono mt-0.5">{ship.mmsi}</div>
+                  <div className="text-xs text-slate-500 font-mono mt-0.5">
+                    MMSI {ship.mmsi} · IMO {ship.imo || '-'}
+                  </div>
                 </td>
                 <td className="px-6 py-4">
                   <div className="text-sm text-slate-900">{ship.flag}</div>

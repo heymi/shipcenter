@@ -17,6 +17,7 @@ export interface Ship {
   name: string;
   cnName?: string;
   mmsi: string;
+  imo?: string;
   flag: string;
   type: string;
   eta: string; // ISO string

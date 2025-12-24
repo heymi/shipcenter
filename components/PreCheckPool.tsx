@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Ship, DocStatus, RiskLevel } from '../types';
+import { formatPortWithCountry } from '../utils/port';
 import { FileText, CheckCircle2, Clock, AlertCircle, ChevronRight, FileCheck } from 'lucide-react';
 
 interface PreCheckProps {
@@ -91,7 +92,7 @@ export const PreCheckPool: React.FC<PreCheckProps> = ({ ships, onUpdateShips }) 
                 )}
               </div>
               <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-500">
-                 <span>上一港: {ship.lastPort}</span>
+                 <span>出发港: {formatPortWithCountry(ship.lastPort)}</span>
                  <span>代理: {ship.agent}</span>
                  <span>ETA: {new Date(ship.eta).toLocaleDateString()}</span>
               </div>

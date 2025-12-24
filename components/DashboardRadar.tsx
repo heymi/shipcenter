@@ -5,6 +5,7 @@ import { Clock, Ship as ShipIcon, Globe2, RefreshCw, Loader2, ArrowUpRight, Acti
 import { isMainlandFlag } from '../utils/ship';
 import { getRiskLabel, getRiskBadgeClass } from '../utils/risk';
 import { formatSmartWeekdayLabel } from '../utils/date';
+import { formatPortWithCountry } from '../utils/port';
 import { fetchDailyAggregates, fetchShipEvents, fetchWeeklyAggregates, ShipAggregate } from '../api';
 import { EVENT_ICON_META } from './eventMeta';
 
@@ -553,7 +554,7 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
                     <p className="text-xs text-slate-400 truncate">{ship.cnName}</p>
                   )}
                   <p className="text-[11px] text-slate-500 font-mono">
-                    MMSI {ship.mmsi} • 船籍 {ship.flag || '-'}
+                    MMSI {ship.mmsi} • IMO {ship.imo || '-'} • 船籍 {ship.flag || '-'}
                   </p>
                 </div>
                   </div>
@@ -582,8 +583,10 @@ export const DashboardRadar: React.FC<DashboardProps> = ({
                       </div>
                     </div>
                     <div className="rounded-2xl border border-white/5 px-3 py-2 bg-white/5">
-                      <p className="text-[11px] text-slate-400 mb-0.5">上一港</p>
-                      <p className="text-sm font-semibold text-white truncate">{ship.lastPort || '-'}</p>
+                      <p className="text-[11px] text-slate-400 mb-0.5">出发港</p>
+                      <p className="text-sm font-semibold text-white truncate">
+                        {formatPortWithCountry(ship.lastPort)}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-end gap-3">

@@ -28,6 +28,12 @@ const DEFAULT_ALLOWLIST = [
   'marinetraffic.com',
   'fleetmon.com',
   'shipspotting.com',
+  'equasis.org',
+  'imo.org',
+  'shipfinder.com',
+  'shipnext.com',
+  'miramarshipindex.com',
+  'shiparchives.com',
   'wikidata.org',
   'wikipedia.org',
   'coscoshipping.com',
@@ -54,6 +60,46 @@ const buildSearchTerm = (ship: ShipInfo) => {
 const safeEncode = (value: string) => encodeURIComponent(value.trim());
 
 const SOURCES: Source[] = [
+  {
+    id: 'shipfinder',
+    label: 'ShipFinder',
+    baseUrl: 'https://shipfinder.com',
+    buildUrls: (ship) => {
+      const term = buildSearchTerm(ship);
+      if (!term) return [];
+      return [`https://shipfinder.com/shipSearch?name=${safeEncode(term)}`];
+    },
+  },
+  {
+    id: 'shipnext',
+    label: 'ShipNext',
+    baseUrl: 'https://shipnext.com',
+    buildUrls: (ship) => {
+      const term = buildSearchTerm(ship);
+      if (!term) return [];
+      return [`https://shipnext.com/vessels?search=${safeEncode(term)}`];
+    },
+  },
+  {
+    id: 'miramar',
+    label: 'Miramar Ship Index',
+    baseUrl: 'https://miramarshipindex.com',
+    buildUrls: (ship) => {
+      const term = buildSearchTerm(ship);
+      if (!term) return [];
+      return [`https://miramarshipindex.com/search.php?query=${safeEncode(term)}`];
+    },
+  },
+  {
+    id: 'shiparchives',
+    label: 'Ship Archives',
+    baseUrl: 'https://shiparchives.com',
+    buildUrls: (ship) => {
+      const term = buildSearchTerm(ship);
+      if (!term) return [];
+      return [`https://shiparchives.com/search?query=${safeEncode(term)}`];
+    },
+  },
   {
     id: 'vesselfinder',
     label: 'VesselFinder',

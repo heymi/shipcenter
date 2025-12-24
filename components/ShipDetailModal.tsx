@@ -1,19 +1,22 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FollowedShipMeta } from '../api';
 import {
   autoAnalyzeShipWithAI,
   deleteShipConfirmedField,
   fetchSharedShipConfirmedFields,
   fetchSharedShipAiAnalysis,
+  fetchShipParties,
   fetchShipAiAnalysis,
   fetchShipConfirmedFields,
   fetchShipEvents,
   saveShipConfirmedField,
   saveShipAiAnalysis,
+  ShipPartiesV2Response,
   ShipAiInference,
 } from '../api';
 import { Ship, ShipEvent } from '../types';
 import { getRiskBadgeClass, getRiskLabel } from '../utils/risk';
+import { formatPortWithCountry } from '../utils/port';
 
 interface ShipDetailModalProps {
   ship: Ship | null;
@@ -59,7 +62,7 @@ const formatRelativeTime = (date?: Date | null) => {
 
 const formatTimestamp = (ms?: number | null) => {
   if (!ms) return '-';
-  return new Date(ms).toLocaleString('zh-CN', { hour12: false });
+  return new Date(ms).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
 };
 
 const normalizeDetail = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -133,41 +136,23 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
   variant = 'modal',
   onBack,
 }) => {
-  if (!ship) return null;
-  const isPage = variant === 'page';
-  const closeLabel = isPage ? '返回分享首页' : '关闭';
-  const handleClose = isPage ? onBack ?? onClose : onClose;
-  const canEdit = Boolean(onUpdateMeta);
-  const canTriggerAi = !shareToken;
-  const rawDraught =
-    typeof ship.draught === 'number'
-      ? ship.draught
-      : typeof ship.draught === 'string'
-        ? Number(ship.draught)
-        : undefined;
-  const hasDraught = typeof rawDraught === 'number' && Number.isFinite(rawDraught);
-
-  const etaStatus = getEtaStatus(ship.eta);
-  const isFollowed = followedSet?.has(ship.mmsi) ?? false;
-  const followDisabled = !onFollowShip || isFollowed;
-  const lastUpdateDate =
-    (ship.lastTime && parseBeijingDate(ship.lastTime)) ||
-    (ship.lastTimeUtc ? new Date(ship.lastTimeUtc * 1000) : null);
-  const lastUpdateLabel = lastUpdateDate
-    ? lastUpdateDate.toLocaleString('zh-CN', { hour12: false })
-    : '-';
-  const lastUpdateRelative = formatRelativeTime(lastUpdateDate);
-  const signalStatus = getSignalStatus(lastUpdateDate);
-  const etdLabel = ship.etd ? formatBeijingWithWeek(ship.etd.replace('T', ' ')) : '-';
   const editableMeta = useMemo(() => meta || {}, [meta]);
   const [aiResults, setAiResults] = useState<Record<string, ShipAiInference | null>>({});
   const [aiUpdatedAt, setAiUpdatedAt] = useState<Record<string, number | null>>({});
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<'overview' | 'parties'>('overview');
+  const [partiesLoading, setPartiesLoading] = useState(false);
+  const [partiesError, setPartiesError] = useState<string | null>(null);
+  const [partiesData, setPartiesData] = useState<Record<string, ShipPartiesV2Response | null>>({});
   const [confirmedFields, setConfirmedFields] = useState<Record<string, string>>({});
   const [confirmLoading, setConfirmLoading] = useState<string | null>(null);
   const [editingField, setEditingField] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState<string>('');
+  const [agentEditing, setAgentEditing] = useState(false);
+  const [agentDraft, setAgentDraft] = useState('');
+  const [agentSaving, setAgentSaving] = useState(false);
+  const [agentSaveError, setAgentSaveError] = useState<string | null>(null);
   const [events, setEvents] = useState<ShipEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
@@ -196,6 +181,31 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
 
   useEffect(() => {
     if (!ship) return;
+    setDetailTab('overview');
+  }, [ship]);
+
+  useEffect(() => {
+    if (!ship) return;
+    const currentAgent = String(meta?.agent ?? ship.agent ?? '');
+    if (!agentEditing) {
+      setAgentDraft(currentAgent);
+    }
+  }, [ship, meta?.agent, ship?.agent, agentEditing]);
+
+  useEffect(() => {
+    if (!ship) return;
+    setAgentEditing(false);
+    setAgentSaveError(null);
+  }, [ship]);
+
+  useEffect(() => {
+    if (!agentEditing) {
+      setAgentSaveError(null);
+    }
+  }, [agentEditing]);
+
+  useEffect(() => {
+    if (!ship) return;
     let active = true;
     const loader = shareToken
       ? fetchSharedShipConfirmedFields(shareToken, String(ship.mmsi))
@@ -218,6 +228,47 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
       active = false;
     };
   }, [ship, shareToken]);
+
+  const loadParties = useCallback(
+    (options?: { forceAi?: boolean; refresh?: boolean }) => {
+      if (!ship) return;
+      const key = String(ship.mmsi);
+      if (!options?.refresh && partiesData[key]) return;
+      let active = true;
+      setPartiesLoading(true);
+      setPartiesError(null);
+      fetchShipParties({
+        imo: ship.imo || null,
+        mmsi: ship.mmsi,
+        name: ship.name,
+        version: '2',
+        mode: 'aggressive',
+        forceAi: options?.forceAi,
+      })
+        .then((payload) => {
+          if (!active) return;
+          setPartiesData((prev) => ({ ...prev, [key]: payload }));
+        })
+        .catch((err) => {
+          console.warn('读取 ship parties 失败', err);
+          if (!active) return;
+          setPartiesError('读取 ship parties 失败');
+        })
+        .finally(() => {
+          if (!active) return;
+          setPartiesLoading(false);
+        });
+      return () => {
+        active = false;
+      };
+    },
+    [ship, partiesData]
+  );
+
+  useEffect(() => {
+    if (!ship || detailTab !== 'parties') return;
+    loadParties({ forceAi: true });
+  }, [ship, detailTab, loadParties]);
 
   useEffect(() => {
     if (!ship) return;
@@ -242,6 +293,101 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
       active = false;
     };
   }, [ship]);
+
+  if (!ship) return null;
+
+  const isPage = variant === 'page';
+  const closeLabel = isPage ? '返回分享首页' : '关闭';
+  const handleClose = isPage ? onBack ?? onClose : onClose;
+  const canEdit = Boolean(onUpdateMeta);
+  const canTriggerAi = !shareToken;
+  const rawDraught =
+    typeof ship.draught === 'number'
+      ? ship.draught
+      : typeof ship.draught === 'string'
+        ? Number(ship.draught)
+        : undefined;
+  const hasDraught = typeof rawDraught === 'number' && Number.isFinite(rawDraught);
+
+  const etaStatus = getEtaStatus(ship.eta);
+  const isFollowed = followedSet?.has(ship.mmsi) ?? false;
+  const followDisabled = !onFollowShip || isFollowed;
+  const lastUpdateDate =
+    (ship.lastTime && parseBeijingDate(ship.lastTime)) ||
+    (ship.lastTimeUtc ? new Date(ship.lastTimeUtc * 1000) : null);
+  const lastUpdateLabel = lastUpdateDate
+    ? lastUpdateDate.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })
+    : '-';
+  const lastUpdateRelative = formatRelativeTime(lastUpdateDate);
+  const signalStatus = getSignalStatus(lastUpdateDate);
+  const etaLabel = ship.eta ? formatBeijingWithWeek(ship.eta.replace('T', ' ')) : '-';
+
+  const agentDisplay = (meta?.agent ?? ship.agent ?? '').trim() || '-';
+  const partiesPayload = partiesData[String(ship.mmsi)] || null;
+  const partiesStatus = partiesPayload?.ai_status;
+  const partiesEmpty =
+    !partiesPayload?.parties?.registeredOwner &&
+    !partiesPayload?.parties?.beneficialOwner &&
+    !partiesPayload?.parties?.operator &&
+    !partiesPayload?.parties?.manager &&
+    !partiesPayload?.parties?.bareboatCharterer &&
+    (!partiesPayload?.candidates || Object.keys(partiesPayload.candidates).length === 0);
+
+  const renderPartyBlock = (
+    label: string,
+    field: 'registeredOwner' | 'beneficialOwner' | 'operator' | 'manager' | 'bareboatCharterer'
+  ) => {
+    const primary = partiesPayload?.parties?.[field] || null;
+    const conflicts = partiesPayload?.candidates?.[field] || [];
+    return (
+      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+        <div className="flex items-center justify-between text-[11px] text-slate-400">
+          <span>{label}</span>
+          <span>{primary ? primary.confidence || '-' : '-'}</span>
+        </div>
+        <p className="text-sm text-white mt-1">{primary?.name || '无法判断'}</p>
+        {primary?.status && (
+          <p className="text-[11px] text-slate-500 mt-1">状态：{primary.status}</p>
+        )}
+        {primary?.evidence?.length ? (
+          <div className="mt-2 space-y-1 text-[11px] text-slate-500">
+            {primary.evidence.map((item, idx) => (
+              <p key={`${field}-evidence-${idx}`}>
+                {item.source} · {item.path} · {item.strength}
+                {item.note ? ` · ${item.note}` : ''}
+              </p>
+            ))}
+          </div>
+        ) : null}
+        {conflicts.length > 0 && (
+          <div className="mt-2 space-y-1 text-[11px] text-amber-300">
+            <p>候选冲突：</p>
+            {conflicts.map((candidate, idx) => (
+              <p key={`${field}-conflict-${idx}`}>
+                {candidate.name} · {candidate.confidence} · {candidate.score}
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const saveAgent = async () => {
+    if (!ship || !onUpdateMeta) return;
+    setAgentSaving(true);
+    setAgentSaveError(null);
+    try {
+      const trimmed = agentDraft.trim();
+      await onUpdateMeta(String(ship.mmsi), { agent: trimmed ? trimmed : null });
+      setAgentEditing(false);
+    } catch (err) {
+      console.warn('保存代理公司失败', err);
+      setAgentSaveError('保存失败，请稍后重试');
+    } finally {
+      setAgentSaving(false);
+    }
+  };
 
   const handleAutoAiInference = async () => {
     if (!ship) return;
@@ -354,6 +500,9 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
                   MMSI {ship.mmsi}
                 </span>
                 <span className="px-2.5 py-1 rounded-full bg-slate-900/60 border border-slate-700">
+                  IMO {ship.imo || '-'}
+                </span>
+                <span className="px-2.5 py-1 rounded-full bg-slate-900/60 border border-slate-700">
                   船籍 {ship.flag || '-'}
                 </span>
                 <span className="px-2.5 py-1 rounded-full bg-slate-900/60 border border-slate-700">
@@ -399,370 +548,111 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
           {ship.riskReason && (
             <p className="text-xs text-slate-400">风险提示：{ship.riskReason}</p>
           )}
+          <div className="inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-900/60 p-1">
+            <button
+              onClick={() => setDetailTab('overview')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-full ${
+                detailTab === 'overview'
+                  ? 'bg-blue-500/20 text-blue-100 border border-blue-400/40'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              详情概览
+            </button>
+            <button
+              onClick={() => setDetailTab('parties')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-full ${
+                detailTab === 'parties'
+                  ? 'bg-blue-500/20 text-blue-100 border border-blue-400/40'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Ship Parties
+            </button>
+          </div>
 
-          <section className="space-y-4">
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">目的地</p>
-              <p className="text-lg font-semibold text-white mt-2">{ship.dest || '南京港'}</p>
-              <p className="text-xs text-slate-500 mt-1">上一港 {ship.lastPort || '-'}</p>
-            </div>
+          {detailTab === 'overview' ? (
+            <>
+              <section className="space-y-4">
+                <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">目的地</p>
+                  <p className="text-lg font-semibold text-white mt-2">{ship.dest || '南京港'}</p>
+                  <p className="text-xs text-slate-500 mt-1">出发港 {formatPortWithCountry(ship.lastPort)}</p>
+                </div>
 
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">标准真实数据</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs text-slate-300 mt-3">
-                <div>
-                  <p className="text-[10px] text-slate-500">船型</p>
-                  <p className="text-sm text-white">{ship.type || '-'}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500">DWT</p>
-                  <p className="text-sm text-white">
-                    {ship.dwt ? `${Number(ship.dwt).toLocaleString()} t` : '-'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500">吃水</p>
-                  <p className="text-sm text-white">{hasDraught ? `${rawDraught!.toFixed(1)} m` : '-'}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500">船长/船宽</p>
-                  <p className="text-sm text-white">
-                    {ship.length ? `${ship.length} m` : '-'} / {ship.width ? `${ship.width} m` : '-'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500">ETD</p>
-                  <p className="text-sm text-white">{etdLabel}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500">AIS 更新时间</p>
-                  <p className="text-sm text-white">{lastUpdateLabel}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500">代理公司</p>
-                  <p className="text-sm text-white">{ship.agent || '-'}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-slate-500">材料状态</p>
-                  <p className="text-sm text-white">{getDocStatusLabel(ship.docStatus)}</p>
-                </div>
-              </div>
-              {ship.riskReason && (
-                <p className="text-xs text-slate-500 mt-3">风险原因：{ship.riskReason}</p>
-              )}
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Dockday 目标船只</p>
-              <label className="flex items-center gap-2 text-sm text-slate-200 mt-2">
-                <input
-                  type="checkbox"
-                  checked={Boolean(editableMeta.is_target)}
-                  disabled={!canEdit}
-                  onChange={(event) => {
-                    if (!onUpdateMeta) return;
-                    void onUpdateMeta(String(ship.mmsi), { is_target: event.target.checked });
-                  }}
-                  className="h-4 w-4 rounded border-slate-700 bg-slate-950/70 text-emerald-300"
-                />
-                添加为 Dockday 目标船只
-              </label>
-              {!canEdit && <p className="text-xs text-slate-500 mt-2">请登录后设置目标船只。</p>}
-            </div>
-          </section>
-
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div>
-                <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">AI 推测</p>
-                {aiUpdatedAt[String(ship.mmsi)] && (
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    上次分析 {formatTimestamp(aiUpdatedAt[String(ship.mmsi)] || 0)}
-                  </p>
-                )}
-              </div>
-              <button
-                onClick={handleAutoAiInference}
-                disabled={aiLoading || !canTriggerAi}
-                className={`px-3 py-2 rounded-full text-xs font-medium border transition ${
-                  aiLoading || !canTriggerAi
-                    ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                    : 'border-emerald-400 text-white hover:bg-emerald-500/10'
-                }`}
-              >
-                {aiLoading
-                  ? 'AI 分析中...'
-                  : aiResults[String(ship.mmsi)]
-                    ? '更新分析'
-                    : 'AI 分析'}
-              </button>
-            </div>
-            {aiError && <p className="text-xs text-amber-300">{aiError}</p>}
-            {Object.keys(confirmedFields).length > 0 && (
-              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
-                <p className="text-[11px] uppercase tracking-[0.3em] text-emerald-200">已确认</p>
-                <div className="mt-2 grid grid-cols-1 gap-1 text-xs text-emerald-50">
-                  {Object.entries(confirmedFields).map(([key, value]) => (
-                    <span key={key}>
-                      {CONFIRMED_LABELS[key] || key}：{value}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-            {aiResults[String(ship.mmsi)] ? (
-              (() => {
-                const result = aiResults[String(ship.mmsi)];
-                if (!result) return null;
-                if (result.parse_error) {
-                  return (
-                    <div className="text-xs text-slate-400">
-                      分析结果解析失败，请点击“更新分析”重新获取。
+                <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">标准真实数据</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs text-slate-300 mt-3">
+                    <div>
+                      <p className="text-[10px] text-slate-500">船型</p>
+                      <p className="text-sm text-white">{ship.type || '-'}</p>
                     </div>
-                  );
-                }
-                const renderConfidence = (block?: any) => {
-                  const level = block?.confidence || 'low';
-                  const pct =
-                    typeof block?.confidence_pct === 'number' && Number.isFinite(block?.confidence_pct)
-                      ? `${Math.round(block.confidence_pct)}%`
-                      : null;
-                  return pct ? `${level} · ${pct}` : level;
-                };
-                const renderBlock = (label: string, block?: any, fieldKey?: string) => {
-                  const confirmedValue = fieldKey ? confirmedFields[fieldKey] : '';
-                  const isEditing = editingField === fieldKey;
-                  return (
-                  <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                    <div className="flex items-center justify-between text-[11px] text-slate-400">
-                      <span>{label}</span>
-                      <span>{renderConfidence(block)}</span>
-                    </div>
-                    <p className="text-sm text-white mt-1">
-                      {confirmedValue || block?.value || '无法判断'}
-                    </p>
-                    {confirmedValue && (
-                      <p className="text-[11px] text-emerald-300 mt-1">人工确认</p>
-                    )}
-                    {Array.isArray(block?.rationale) && block.rationale.length > 0 && (
-                      <p className="text-[11px] text-slate-500 mt-1">{block.rationale.join('；')}</p>
-                    )}
-                    {!shareToken && fieldKey && (
-                      <div className="flex items-center gap-2 mt-2">
-                        <button
-                          type="button"
-                          disabled={confirmLoading === fieldKey || !block?.value}
-                          onClick={() =>
-                            applyConfirmedField(
-                              fieldKey,
-                              String(block?.value ?? '').trim(),
-                              String(block?.value ?? ''),
-                              typeof block?.confidence_pct === 'number' ? block.confidence_pct : null,
-                              'ai_confirmed'
-                            )
-                          }
-                          className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                            confirmLoading === fieldKey || !block?.value
-                              ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                              : 'border-emerald-400/60 text-emerald-200 hover:text-white'
-                          }`}
-                        >
-                          确认
-                        </button>
-                        <button
-                          type="button"
-                          disabled={confirmLoading === fieldKey}
-                          onClick={() => {
-                            setEditingField(fieldKey);
-                            setEditingValue(confirmedValue || String(block?.value ?? '').trim());
-                          }}
-                          className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                            confirmLoading === fieldKey
-                              ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                              : 'border-blue-400/60 text-blue-200 hover:text-white'
-                          }`}
-                        >
-                          纠正
-                        </button>
-                        {confirmedValue && (
-                          <button
-                            type="button"
-                            disabled={confirmLoading === fieldKey}
-                            onClick={() => clearConfirmedField(fieldKey)}
-                            className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                              confirmLoading === fieldKey
-                                ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                                : 'border-slate-600 text-slate-300 hover:text-white'
-                            }`}
-                          >
-                            取消确认
-                          </button>
-                        )}
-                      </div>
-                    )}
-                    {!shareToken && fieldKey && isEditing && (
-                      <div className="mt-2 flex items-center gap-2">
-                        <input
-                          value={editingValue}
-                          onChange={(event) => setEditingValue(event.target.value)}
-                          className="flex-1 rounded-md border border-slate-700 bg-slate-950/80 px-2 py-1 text-xs text-slate-200 focus:border-blue-400 focus:outline-none"
-                          placeholder={`输入${label}`}
-                        />
-                        <button
-                          type="button"
-                          disabled={confirmLoading === fieldKey || !editingValue.trim()}
-                          onClick={() =>
-                            applyConfirmedField(
-                              fieldKey,
-                              editingValue.trim(),
-                              String(block?.value ?? ''),
-                              typeof block?.confidence_pct === 'number' ? block.confidence_pct : null,
-                              'manual'
-                            )
-                          }
-                          className={`text-[11px] px-2 py-1 rounded-md border ${
-                            confirmLoading === fieldKey || !editingValue.trim()
-                              ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                              : 'border-blue-400/60 text-blue-200 hover:text-white'
-                          }`}
-                        >
-                          保存
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingField(null);
-                            setEditingValue('');
-                          }}
-                          className="text-[11px] px-2 py-1 rounded-md border border-slate-700 text-slate-400 hover:text-white"
-                        >
-                          取消
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  );
-                };
-                return (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {renderBlock('货物类型', result.cargo_type_guess, 'cargo_type')}
-                    {renderBlock('停靠码头', result.berth_guess, 'berth')}
-                    {renderBlock('代理公司', result.agent_guess, 'agent')}
-                    {renderBlock('船员国籍', result.crew_nationality_guess, 'crew_nationality')}
-                    <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                      <div className="flex items-center justify-between text-[11px] text-slate-400">
-                        <span>船员人数</span>
-                        <span>{renderConfidence(result.crew_count_guess)}</span>
-                      </div>
-                      <p className="text-sm text-white mt-1">
-                        {confirmedFields.crew_count ?? result.crew_count_guess?.value ?? '无法判断'}
+                    <div>
+                      <p className="text-[10px] text-slate-500">DWT</p>
+                      <p className="text-sm text-white">
+                        {ship.dwt ? `${Number(ship.dwt).toLocaleString()} t` : '-'}
                       </p>
-                      {confirmedFields.crew_count && (
-                        <p className="text-[11px] text-emerald-300 mt-1">人工确认</p>
-                      )}
-                      {Array.isArray(result.crew_count_guess?.rationale) &&
-                        result.crew_count_guess?.rationale?.length ? (
-                        <p className="text-[11px] text-slate-500 mt-1">
-                          {result.crew_count_guess?.rationale?.join('；')}
-                        </p>
-                      ) : null}
-                      {!shareToken && (
-                        <div className="flex items-center gap-2 mt-2">
-                          <button
-                            type="button"
-                            disabled={confirmLoading === 'crew_count' || result.crew_count_guess?.value === undefined}
-                            onClick={() =>
-                              applyConfirmedField(
-                                'crew_count',
-                                String(result.crew_count_guess?.value ?? '').trim(),
-                                result.crew_count_guess?.value !== undefined
-                                  ? String(result.crew_count_guess?.value)
-                                  : null,
-                                typeof result.crew_count_guess?.confidence_pct === 'number'
-                                  ? result.crew_count_guess.confidence_pct
-                                  : null,
-                                'ai_confirmed'
-                              )
-                            }
-                            className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                              confirmLoading === 'crew_count' || result.crew_count_guess?.value === undefined
-                                ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                                : 'border-emerald-400/60 text-emerald-200 hover:text-white'
-                            }`}
-                          >
-                            确认
-                          </button>
-                          <button
-                            type="button"
-                            disabled={confirmLoading === 'crew_count'}
-                            onClick={() => {
-                              setEditingField('crew_count');
-                              setEditingValue(
-                                confirmedFields.crew_count ??
-                                  String(result.crew_count_guess?.value ?? '').trim()
-                              );
-                            }}
-                            className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                              confirmLoading === 'crew_count'
-                                ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                                : 'border-blue-400/60 text-blue-200 hover:text-white'
-                            }`}
-                          >
-                            纠正
-                          </button>
-                          {confirmedFields.crew_count && (
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-500">吃水</p>
+                      <p className="text-sm text-white">{hasDraught ? `${rawDraught!.toFixed(1)} m` : '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-500">船长/船宽</p>
+                      <p className="text-sm text-white">
+                        {ship.length ? `${ship.length} m` : '-'} / {ship.width ? `${ship.width} m` : '-'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-500">ETA</p>
+                      <p className="text-sm text-white">{etaLabel}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-500">AIS 更新时间</p>
+                      <p className="text-sm text-white">{lastUpdateLabel}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-500">代理公司</p>
+                      {!agentEditing && (
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm text-white">{agentDisplay}</p>
+                          {canEdit && (
                             <button
                               type="button"
-                              disabled={confirmLoading === 'crew_count'}
-                              onClick={() => clearConfirmedField('crew_count')}
-                              className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                                confirmLoading === 'crew_count'
-                                  ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                                  : 'border-slate-600 text-slate-300 hover:text-white'
-                              }`}
+                              onClick={() => setAgentEditing(true)}
+                              className="text-[11px] px-2 py-0.5 rounded-full border border-blue-400/60 text-blue-200 hover:text-white"
                             >
-                              取消确认
+                              编辑
                             </button>
                           )}
                         </div>
                       )}
-                      {!shareToken && editingField === 'crew_count' && (
-                        <div className="mt-2 flex items-center gap-2">
+                      {agentEditing && (
+                        <div className="mt-1 flex items-center gap-2">
                           <input
-                            value={editingValue}
-                            onChange={(event) => setEditingValue(event.target.value)}
+                            value={agentDraft}
+                            onChange={(event) => setAgentDraft(event.target.value)}
                             className="flex-1 rounded-md border border-slate-700 bg-slate-950/80 px-2 py-1 text-xs text-slate-200 focus:border-blue-400 focus:outline-none"
-                            placeholder="输入船员人数"
+                            placeholder="输入代理公司"
                           />
                           <button
                             type="button"
-                            disabled={confirmLoading === 'crew_count' || !editingValue.trim()}
-                            onClick={() =>
-                              applyConfirmedField(
-                                'crew_count',
-                                editingValue.trim(),
-                                result.crew_count_guess?.value !== undefined
-                                  ? String(result.crew_count_guess?.value)
-                                  : null,
-                                typeof result.crew_count_guess?.confidence_pct === 'number'
-                                  ? result.crew_count_guess.confidence_pct
-                                  : null,
-                                'manual'
-                              )
-                            }
+                            disabled={agentSaving}
+                            onClick={saveAgent}
                             className={`text-[11px] px-2 py-1 rounded-md border ${
-                              confirmLoading === 'crew_count' || !editingValue.trim()
+                              agentSaving
                                 ? 'border-slate-800 text-slate-500 cursor-not-allowed'
-                                : 'border-blue-400/60 text-blue-200 hover:text-white'
+                                : 'border-emerald-400/60 text-emerald-200 hover:text-white'
                             }`}
                           >
                             保存
                           </button>
                           <button
                             type="button"
+                            disabled={agentSaving}
                             onClick={() => {
-                              setEditingField(null);
-                              setEditingValue('');
+                              setAgentEditing(false);
+                              setAgentDraft(String(meta?.agent ?? ship.agent ?? ''));
                             }}
                             className="text-[11px] px-2 py-1 rounded-md border border-slate-700 text-slate-400 hover:text-white"
                           >
@@ -770,46 +660,445 @@ export const ShipDetailModal: React.FC<ShipDetailModalProps> = ({
                           </button>
                         </div>
                       )}
+                      {agentSaveError && (
+                        <p className="text-[11px] text-rose-300 mt-1">{agentSaveError}</p>
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-500">材料状态</p>
+                      <p className="text-sm text-white">{getDocStatusLabel(ship.docStatus)}</p>
                     </div>
                   </div>
-                );
-              })()
-            ) : (
-              <p className="text-xs text-slate-500">暂无 AI 推测结果</p>
-            )}
-          </section>
+                  {ship.riskReason && (
+                    <p className="text-xs text-slate-500 mt-3">风险原因：{ship.riskReason}</p>
+                  )}
+                </div>
 
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-            <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">最新动态</p>
-            {eventsLoading && <p className="text-xs text-slate-500 mt-2">动态加载中...</p>}
-            {eventsError && <p className="text-xs text-amber-300 mt-2">{eventsError}</p>}
-            {(() => {
-              const sorted = [...events].sort((a, b) => (b.detected_at || 0) - (a.detected_at || 0));
-              const uniqEvents = sorted.filter((event, idx, arr) => {
-                const norm = normalizeDetail(event.detail || '');
-                return (
-                  arr.findIndex(
-                    (ev) =>
-                      normalizeDetail(ev.detail || '') === norm && ev.event_type === event.event_type
-                  ) === idx
-                );
-              });
-              if (!eventsLoading && uniqEvents.length === 0) {
-                return <p className="text-xs text-slate-500 mt-2">暂无动态</p>;
-              }
-              return uniqEvents.slice(0, 8).map((event) => (
-                <div
-                  key={`${event.mmsi}-${event.event_type}-${event.detail}`}
-                  className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3"
-                >
-                  <p className="text-sm text-slate-200">{event.detail}</p>
+                <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Dockday 目标船只</p>
+                  <label className="flex items-center gap-2 text-sm text-slate-200 mt-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editableMeta.is_target)}
+                      disabled={!canEdit}
+                      onChange={(event) => {
+                        if (!onUpdateMeta) return;
+                        void onUpdateMeta(String(ship.mmsi), { is_target: event.target.checked });
+                      }}
+                      className="h-4 w-4 rounded border-slate-700 bg-slate-950/70 text-emerald-300"
+                    />
+                    添加为 Dockday 目标船只
+                  </label>
+                  {!canEdit && <p className="text-xs text-slate-500 mt-2">请登录后设置目标船只。</p>}
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">AI 推测</p>
+                    {aiUpdatedAt[String(ship.mmsi)] && (
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        上次分析 {formatTimestamp(aiUpdatedAt[String(ship.mmsi)] || 0)}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleAutoAiInference}
+                    disabled={aiLoading || !canTriggerAi}
+                    className={`px-3 py-2 rounded-full text-xs font-medium border transition ${
+                      aiLoading || !canTriggerAi
+                        ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                        : 'border-emerald-400 text-white hover:bg-emerald-500/10'
+                    }`}
+                  >
+                    {aiLoading
+                      ? 'AI 分析中...'
+                      : aiResults[String(ship.mmsi)]
+                        ? '更新分析'
+                        : 'AI 分析'}
+                  </button>
+                </div>
+                {aiError && <p className="text-xs text-amber-300">{aiError}</p>}
+                {Object.keys(confirmedFields).length > 0 && (
+                  <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-emerald-200">已确认</p>
+                    <div className="mt-2 grid grid-cols-1 gap-1 text-xs text-emerald-50">
+                      {Object.entries(confirmedFields).map(([key, value]) => (
+                        <span key={key}>
+                          {CONFIRMED_LABELS[key] || key}：{value}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {aiResults[String(ship.mmsi)] ? (
+                  (() => {
+                    const result = aiResults[String(ship.mmsi)];
+                    if (!result) return null;
+                    if (result.parse_error) {
+                      return (
+                        <div className="text-xs text-slate-400">
+                          分析结果解析失败，请点击“更新分析”重新获取。
+                        </div>
+                      );
+                    }
+                    const renderConfidence = (block?: any) => {
+                      const level = block?.confidence || 'low';
+                      const pct =
+                        typeof block?.confidence_pct === 'number' && Number.isFinite(block?.confidence_pct)
+                          ? `${Math.round(block.confidence_pct)}%`
+                          : null;
+                      return pct ? `${level} · ${pct}` : level;
+                    };
+                    const renderBlock = (label: string, block?: any, fieldKey?: string) => {
+                      const confirmedValue = fieldKey ? confirmedFields[fieldKey] : '';
+                      const isEditing = editingField === fieldKey;
+                      return (
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+                        <div className="flex items-center justify-between text-[11px] text-slate-400">
+                          <span>{label}</span>
+                          <span>{renderConfidence(block)}</span>
+                        </div>
+                        <p className="text-sm text-white mt-1">
+                          {confirmedValue || block?.value || '无法判断'}
+                        </p>
+                        {confirmedValue && (
+                          <p className="text-[11px] text-emerald-300 mt-1">人工确认</p>
+                        )}
+                        {Array.isArray(block?.rationale) && block.rationale.length > 0 && (
+                          <p className="text-[11px] text-slate-500 mt-1">{block.rationale.join('；')}</p>
+                        )}
+                        {!shareToken && fieldKey && (
+                          <div className="flex items-center gap-2 mt-2">
+                            <button
+                              type="button"
+                              disabled={confirmLoading === fieldKey || !block?.value}
+                              onClick={() =>
+                                applyConfirmedField(
+                                  fieldKey,
+                                  String(block?.value ?? '').trim(),
+                                  String(block?.value ?? ''),
+                                  typeof block?.confidence_pct === 'number' ? block.confidence_pct : null,
+                                  'ai_confirmed'
+                                )
+                              }
+                              className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                                confirmLoading === fieldKey || !block?.value
+                                  ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                  : 'border-emerald-400/60 text-emerald-200 hover:text-white'
+                              }`}
+                            >
+                              确认
+                            </button>
+                            <button
+                              type="button"
+                              disabled={confirmLoading === fieldKey}
+                              onClick={() => {
+                                setEditingField(fieldKey);
+                                setEditingValue(confirmedValue || String(block?.value ?? '').trim());
+                              }}
+                              className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                                confirmLoading === fieldKey
+                                  ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                  : 'border-blue-400/60 text-blue-200 hover:text-white'
+                              }`}
+                            >
+                              纠正
+                            </button>
+                            {confirmedValue && (
+                              <button
+                                type="button"
+                                disabled={confirmLoading === fieldKey}
+                                onClick={() => clearConfirmedField(fieldKey)}
+                                className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                                  confirmLoading === fieldKey
+                                    ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                    : 'border-slate-600 text-slate-300 hover:text-white'
+                                }`}
+                              >
+                                取消确认
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {!shareToken && fieldKey && isEditing && (
+                          <div className="mt-2 flex items-center gap-2">
+                            <input
+                              value={editingValue}
+                              onChange={(event) => setEditingValue(event.target.value)}
+                              className="flex-1 rounded-md border border-slate-700 bg-slate-950/80 px-2 py-1 text-xs text-slate-200 focus:border-blue-400 focus:outline-none"
+                              placeholder={`输入${label}`}
+                            />
+                            <button
+                              type="button"
+                              disabled={confirmLoading === fieldKey || !editingValue.trim()}
+                              onClick={() =>
+                                applyConfirmedField(
+                                  fieldKey,
+                                  editingValue.trim(),
+                                  String(block?.value ?? ''),
+                                  typeof block?.confidence_pct === 'number' ? block.confidence_pct : null,
+                                  'manual'
+                                )
+                              }
+                              className={`text-[11px] px-2 py-1 rounded-md border ${
+                                confirmLoading === fieldKey || !editingValue.trim()
+                                  ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                  : 'border-blue-400/60 text-blue-200 hover:text-white'
+                              }`}
+                            >
+                              保存
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingField(null);
+                                setEditingValue('');
+                              }}
+                              className="text-[11px] px-2 py-1 rounded-md border border-slate-700 text-slate-400 hover:text-white"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      );
+                    };
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {renderBlock('货物类型', result.cargo_type_guess, 'cargo_type')}
+                        {renderBlock('停靠码头', result.berth_guess, 'berth')}
+                        {renderBlock('代理公司', result.agent_guess, 'agent')}
+                        {renderBlock('船员国籍', result.crew_nationality_guess, 'crew_nationality')}
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+                          <div className="flex items-center justify-between text-[11px] text-slate-400">
+                            <span>船员人数</span>
+                            <span>{renderConfidence(result.crew_count_guess)}</span>
+                          </div>
+                          <p className="text-sm text-white mt-1">
+                            {confirmedFields.crew_count ?? result.crew_count_guess?.value ?? '无法判断'}
+                          </p>
+                          {confirmedFields.crew_count && (
+                            <p className="text-[11px] text-emerald-300 mt-1">人工确认</p>
+                          )}
+                          {Array.isArray(result.crew_count_guess?.rationale) &&
+                            result.crew_count_guess?.rationale?.length ? (
+                            <p className="text-[11px] text-slate-500 mt-1">
+                              {result.crew_count_guess?.rationale?.join('；')}
+                            </p>
+                          ) : null}
+                          {!shareToken && (
+                            <div className="flex items-center gap-2 mt-2">
+                              <button
+                                type="button"
+                                disabled={confirmLoading === 'crew_count' || result.crew_count_guess?.value === undefined}
+                                onClick={() =>
+                                  applyConfirmedField(
+                                    'crew_count',
+                                    String(result.crew_count_guess?.value ?? '').trim(),
+                                    result.crew_count_guess?.value !== undefined
+                                      ? String(result.crew_count_guess?.value)
+                                      : null,
+                                    typeof result.crew_count_guess?.confidence_pct === 'number'
+                                      ? result.crew_count_guess.confidence_pct
+                                      : null,
+                                    'ai_confirmed'
+                                  )
+                                }
+                                className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                                  confirmLoading === 'crew_count' || result.crew_count_guess?.value === undefined
+                                    ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                    : 'border-emerald-400/60 text-emerald-200 hover:text-white'
+                                }`}
+                              >
+                                确认
+                              </button>
+                              <button
+                                type="button"
+                                disabled={confirmLoading === 'crew_count'}
+                                onClick={() => {
+                                  setEditingField('crew_count');
+                                  setEditingValue(
+                                    confirmedFields.crew_count ??
+                                      String(result.crew_count_guess?.value ?? '').trim()
+                                  );
+                                }}
+                                className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                                  confirmLoading === 'crew_count'
+                                    ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                    : 'border-blue-400/60 text-blue-200 hover:text-white'
+                                }`}
+                              >
+                                纠正
+                              </button>
+                              {confirmedFields.crew_count && (
+                                <button
+                                  type="button"
+                                  disabled={confirmLoading === 'crew_count'}
+                                  onClick={() => clearConfirmedField('crew_count')}
+                                  className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                                    confirmLoading === 'crew_count'
+                                      ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                      : 'border-slate-600 text-slate-300 hover:text-white'
+                                  }`}
+                                >
+                                  取消确认
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {!shareToken && editingField === 'crew_count' && (
+                            <div className="mt-2 flex items-center gap-2">
+                              <input
+                                value={editingValue}
+                                onChange={(event) => setEditingValue(event.target.value)}
+                                className="flex-1 rounded-md border border-slate-700 bg-slate-950/80 px-2 py-1 text-xs text-slate-200 focus:border-blue-400 focus:outline-none"
+                                placeholder="输入船员人数"
+                              />
+                              <button
+                                type="button"
+                                disabled={confirmLoading === 'crew_count' || !editingValue.trim()}
+                                onClick={() =>
+                                  applyConfirmedField(
+                                    'crew_count',
+                                    editingValue.trim(),
+                                    result.crew_count_guess?.value !== undefined
+                                      ? String(result.crew_count_guess?.value)
+                                      : null,
+                                    typeof result.crew_count_guess?.confidence_pct === 'number'
+                                      ? result.crew_count_guess.confidence_pct
+                                      : null,
+                                    'manual'
+                                  )
+                                }
+                                className={`text-[11px] px-2 py-1 rounded-md border ${
+                                  confirmLoading === 'crew_count' || !editingValue.trim()
+                                    ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                                    : 'border-blue-400/60 text-blue-200 hover:text-white'
+                                }`}
+                              >
+                                保存
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingField(null);
+                                  setEditingValue('');
+                                }}
+                                className="text-[11px] px-2 py-1 rounded-md border border-slate-700 text-slate-400 hover:text-white"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <p className="text-xs text-slate-500">暂无 AI 推测结果</p>
+                )}
+              </section>
+
+              <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+                <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">最新动态</p>
+                {eventsLoading && <p className="text-xs text-slate-500 mt-2">动态加载中...</p>}
+                {eventsError && <p className="text-xs text-amber-300 mt-2">{eventsError}</p>}
+                {(() => {
+                  const sorted = [...events].sort((a, b) => (b.detected_at || 0) - (a.detected_at || 0));
+                  const uniqEvents = sorted.filter((event, idx, arr) => {
+                    const norm = normalizeDetail(event.detail || '');
+                    return (
+                      arr.findIndex(
+                        (ev) =>
+                          normalizeDetail(ev.detail || '') === norm && ev.event_type === event.event_type
+                      ) === idx
+                    );
+                  });
+                  if (!eventsLoading && uniqEvents.length === 0) {
+                    return <p className="text-xs text-slate-500 mt-2">暂无动态</p>;
+                  }
+                  return uniqEvents.slice(0, 8).map((event) => (
+                    <div
+                      key={`${event.mmsi}-${event.event_type}-${event.detail}`}
+                      className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3"
+                    >
+                      <p className="text-sm text-slate-200">{event.detail}</p>
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        {formatTimestamp(event.detected_at)}
+                      </p>
+                    </div>
+                  ));
+                })()}
+              </section>
+            </>
+          ) : (
+            <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Ship Parties</p>
                   <p className="text-[11px] text-slate-500 mt-1">
-                    {formatTimestamp(event.detected_at)}
+                    仅展示有证据支持的结果；冲突会列出候选项与证据路径。
                   </p>
                 </div>
-              ));
-            })()}
-          </section>
+                <div className="flex items-center gap-2">
+                  {partiesStatus && (
+                    <span className="text-[11px] text-slate-500">AI 状态：{partiesStatus}</span>
+                  )}
+                  {partiesPayload?.retrieval_status && (
+                    <span className="text-[11px] text-slate-500">检索：{partiesPayload.retrieval_status}</span>
+                  )}
+                  <button
+                    onClick={() => loadParties({ forceAi: true, refresh: true })}
+                    disabled={partiesLoading}
+                    className={`px-3 py-1.5 rounded-full text-xs font-medium border ${
+                      partiesLoading
+                        ? 'border-slate-800 text-slate-500 cursor-not-allowed'
+                        : 'border-emerald-400/50 text-emerald-100 hover:text-white hover:border-emerald-300'
+                    }`}
+                  >
+                    {partiesLoading ? '分析中...' : 'AI 再分析'}
+                  </button>
+                </div>
+              </div>
+              {partiesLoading && <p className="text-xs text-slate-500">加载中...</p>}
+              {partiesError && <p className="text-xs text-amber-300">{partiesError}</p>}
+              {!partiesLoading && !partiesError && !partiesPayload && (
+                <p className="text-xs text-slate-500">暂无可用数据</p>
+              )}
+              {!partiesLoading && !partiesError && partiesPayload && partiesEmpty && (
+                <p className="text-xs text-amber-300">
+                  {partiesStatus === 'failed'
+                    ? 'AI 分析失败，请稍后重试'
+                    : partiesStatus === 'not_requested'
+                      ? '暂无证据，无法判断'
+                      : '无法判断'}
+                </p>
+              )}
+              {partiesPayload && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {renderPartyBlock('Registered Owner', 'registeredOwner')}
+                  {renderPartyBlock('Beneficial Owner', 'beneficialOwner')}
+                  {renderPartyBlock('Operator', 'operator')}
+                  {renderPartyBlock('Manager', 'manager')}
+                  {renderPartyBlock('Bareboat Charterer', 'bareboatCharterer')}
+                </div>
+              )}
+              {partiesPayload?.contacts?.length ? (
+                <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+                  <p className="text-[11px] text-slate-400">联系方式（仅官方来源）</p>
+                  <div className="mt-2 space-y-1 text-xs text-slate-200">
+                    {partiesPayload.contacts.map((contact, idx) => (
+                      <p key={`contact-${idx}`}>
+                        {contact.company} · {contact.type} · {contact.value}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </section>
+          )}
     </div>
   );
 

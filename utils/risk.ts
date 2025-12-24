@@ -136,7 +136,7 @@ export const evaluateRiskRules = (ship: ShipxyShip) => {
 
   if (!ship.preport_cnname) {
     score += 1;
-    reasons.push('上一港缺失');
+    reasons.push('出发港缺失');
   }
 
   let level = RiskLevel.NORMAL;

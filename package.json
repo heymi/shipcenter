@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "start:server": "node --import tsx server/index.ts"
+    "start:server": "node --import tsx server/index.ts",
+    "test:ship-parties": "node --import tsx server/__tests__/shipParties.test.ts",
+    "test:ship-parties-v2": "node --import tsx server/__tests__/shipPartiesV2.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",

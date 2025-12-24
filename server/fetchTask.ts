@@ -7,6 +7,7 @@ import {
   getShipEventsInRange,
   saveEvents,
   saveSnapshot,
+  upsertArrivedShips,
   upsertDailyAggregate,
   upsertWeeklyAggregate,
 } from './db';
@@ -27,6 +28,8 @@ const HOUR_MS = 60 * 60 * 1000;
 const ARRIVAL_SOON_WINDOW_MS = Number(process.env.ARRIVAL_WINDOW_HOURS || 6) * HOUR_MS;
 const ARRIVAL_IMMINENT_WINDOW_MS = 2 * HOUR_MS;
 const ARRIVAL_URGENT_WINDOW_MS = 30 * 60 * 1000;
+const ARRIVED_WINDOW_HOURS = Number(process.env.ARRIVED_WINDOW_HOURS || 72);
+const ARRIVED_WINDOW_MS = ARRIVED_WINDOW_HOURS * HOUR_MS;
 const ARRIVAL_THRESHOLDS = [
   {
     type: 'ARRIVAL_SOON',
@@ -85,6 +88,37 @@ const storeEvents = async (events: TrackedEvent[]) => {
       detected_at: Date.now(),
     }))
   );
+};
+
+const storeArrivedShips = async (ships: Ship[]) => {
+  if (!ships.length) return;
+  const now = Date.now();
+  const rows = ships.map((ship) => {
+    const etaTimestamp = getEtaTimestamp(ship);
+    if (etaTimestamp === null) return null;
+    const etaUtc = Number.isFinite(ship.eta_utc)
+      ? Number(ship.eta_utc)
+      : Math.floor(etaTimestamp / 1000);
+    return {
+      port_code: PORT_CODE,
+      mmsi: String(ship.mmsi ?? '').replace(/\.0+$/, ''),
+      ship_name: ship.ship_name || null,
+      ship_cnname: ship.ship_cnname || null,
+      ship_flag: ship.ship_flag || null,
+      eta: ship.eta || null,
+      eta_utc: etaUtc,
+      arrived_at: etaTimestamp,
+      detected_at: now,
+      last_port: ship.preport_cnname || ship.last_port || null,
+      dest: ship.dest || null,
+      source: 'shipxy',
+      data_json: JSON.stringify(ship),
+    };
+  });
+  const payload = rows.filter((row): row is NonNullable<typeof row> => Boolean(row));
+  if (payload.length) {
+    await upsertArrivedShips(payload);
+  }
 };
 
 const getLastUpdateTimestamp = (ship?: Partial<Ship>) => {
@@ -263,7 +297,7 @@ const diffShips = async (prev?: Ship[], next?: Ship[], prevFetchedAt?: number): 
           events.push({
             mmsi: ship.mmsi,
             type: 'LAST_PORT_CHANGE',
-            detail: `${ship.ship_name} 上一港由 ${safePrev} 改为 ${safeCurrent}`,
+            detail: `${ship.ship_name} 出发港由 ${safePrev} 改为 ${safeCurrent}`,
             flag: ship.ship_flag,
           });
         }
@@ -333,6 +367,13 @@ const runFetchJob = async () => {
     const ships = await fetchShips();
     const prev = await loadLatestSnapshot();
     await storeSnapshot(ships);
+    const now = Date.now();
+    const arrivedShips = ships.filter((ship) => {
+      const etaTimestamp = getEtaTimestamp(ship);
+      if (etaTimestamp === null) return false;
+      return etaTimestamp <= now && etaTimestamp >= now - ARRIVED_WINDOW_MS;
+    });
+    await storeArrivedShips(arrivedShips);
     if (prev) {
       const previousShips: Ship[] = JSON.parse(prev.data_json);
       const events = await diffShips(previousShips, ships, prev.fetched_at);

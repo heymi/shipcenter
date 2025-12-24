@@ -4,6 +4,7 @@ import { Ship } from '../types';
 import { isMainlandFlag } from '../utils/ship';
 import { getRiskBadgeClass, getRiskLabel } from '../utils/risk';
 import { formatSmartWeekdayLabel } from '../utils/date';
+import { formatPortWithCountry } from '../utils/port';
 import { ShipDetailModal } from './ShipDetailModal';
 
 interface CrewLifecyclePageProps {
@@ -393,7 +394,7 @@ export const CrewLifecyclePage: React.FC<CrewLifecyclePageProps> = ({ ships, all
                 </p>
                 <p>船籍 {selectedShip.flag || '-'}</p>
                 <p>ETA {selectedShip.eta?.replace('T', ' ') || '-'}</p>
-                <p>上一港 {selectedShip.lastPort || '-'}</p>
+                <p>出发港 {formatPortWithCountry(selectedShip.lastPort)}</p>
               </div>
               <button
                 onClick={() => setDetailShip(selectedShip)}

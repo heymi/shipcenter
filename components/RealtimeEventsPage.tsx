@@ -7,16 +7,19 @@ import { isMainlandFlag } from '../utils/ship';
 import { getRiskBadgeClass, getRiskLabel } from '../utils/risk';
 import { ArrivalDetailsPage } from './ArrivalDetailsPage';
 import { supabase } from '../supabaseClient';
+import { formatPortWithCountry } from '../utils/port';
 
 interface RealtimeEventsPageProps {
   ships: Ship[];
   allShips: Ship[];
+  arrivalShips?: Ship[];
   onSelectShip: (ship: Ship) => void;
   onFollowShip?: (ship: Ship) => void;
   followedSet?: Set<string>;
   dockdayTargetSet?: Set<string>;
-  tab?: 'events' | 'arrivals';
-  onTabChange?: (tab: 'events' | 'arrivals') => void;
+  tab?: 'events' | 'arrivals' | 'arrived';
+  onTabChange?: (tab: 'events' | 'arrivals' | 'arrived') => void;
+  shipCache?: Record<string, Ship>;
   arrivalDataUpdatedAt?: number | null;
   onShareArrivals?: () => void;
   shareArrivalsActive?: boolean;
@@ -64,24 +67,29 @@ const SIDEBAR_SCROLL_ANIMATION = `
 export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   ships,
   allShips,
+  arrivalShips,
   onSelectShip,
   onFollowShip,
   followedSet,
   dockdayTargetSet,
   tab,
   onTabChange,
+  shipCache,
   arrivalDataUpdatedAt,
   onShareArrivals,
   shareArrivalsActive,
   isShareModeArrivals,
 }) => {
   const [shipEvents, setShipEvents] = useState<ShipEvent[]>([]);
-  const [internalTab, setInternalTab] = useState<'arrivals' | 'events'>(tab ?? 'arrivals');
+  const [internalTab, setInternalTab] = useState<'arrivals' | 'events' | 'arrived'>(tab ?? 'arrivals');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sinceHours, setSinceHours] = useState(12);
   const [eventType, setEventType] = useState('ALL');
   const [page, setPage] = useState(1);
+  const [arrivedWindow, setArrivedWindow] = useState(72);
+  const [arrivedType, setArrivedType] = useState('ALL');
+  const [arrivedPage, setArrivedPage] = useState(1);
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMessage, setBatchMessage] = useState<string | null>(null);
@@ -89,6 +97,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   const knownMmsiRef = useRef<Set<string>>(new Set());
   const autoQueueRef = useRef<Promise<void>>(Promise.resolve());
   const PAGE_SIZE = 15;
+  const ARRIVED_PAGE_SIZE = 10;
   const batchOnceKey = 'dockday_ai_batch_events_v1';
 
   const canRunAi = useCallback(async () => {
@@ -223,10 +232,18 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
 
   const shipLookup = useMemo(() => {
     const map = new Map<string, Ship>();
+    const cacheList = shipCache ? Object.values(shipCache) : [];
+    cacheList.forEach((ship) => map.set(ship.mmsi.toString(), ship));
     const pool = allShips.length > 0 ? allShips : ships;
     pool.forEach((ship) => map.set(ship.mmsi.toString(), ship));
+    if (allShips.length > 0) {
+      ships.forEach((ship) => map.set(ship.mmsi.toString(), ship));
+    }
     return map;
-  }, [ships, allShips]);
+  }, [ships, allShips, shipCache]);
+
+  const arrivedShipsSource = arrivalShips ?? [];
+  const useArrivedShipCache = arrivalShips === undefined;
 
   const enqueueAutoAnalyze = useCallback(
     (mmsiList: string[]) => {
@@ -351,6 +368,32 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
 
   const formatTimestamp = (ms: number) => new Date(ms).toLocaleString('zh-CN', { hour12: false });
 
+  const parseEta = (eta?: string | null) => {
+    if (!eta) return null;
+    const cleaned = eta.replace(/[（(].*?[）)]/g, '').replace(/\s+/g, ' ').trim();
+    if (!cleaned) return null;
+    const candidate = cleaned.includes('T') ? cleaned : cleaned.replace(' ', 'T');
+    const attempts = [candidate, `${candidate}+08:00`, `${candidate}Z`];
+    for (const value of attempts) {
+      const parsed = Date.parse(value);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+    return null;
+  };
+
+  const formatEtaBeijing = (eta?: string | null) => {
+    const ts = parseEta(eta);
+    if (!ts) return '-';
+    return new Date(ts).toLocaleString('zh-CN', {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Shanghai',
+    });
+  };
+
   const handleShipClick = (event: ShipEvent) => {
     const key = typeof event.mmsi === 'string' ? event.mmsi : String(event.mmsi);
     const ship = shipLookup.get(key);
@@ -358,7 +401,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
   };
 
   const activeTab = tab ?? internalTab;
-  const handleTabChange = (next: 'arrivals' | 'events') => {
+  const handleTabChange = (next: 'arrivals' | 'events' | 'arrived') => {
     setInternalTab(next);
     onTabChange?.(next);
   };
@@ -367,6 +410,16 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
     if (isShareModeArrivals) handleTabChange('arrivals');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isShareModeArrivals]);
+
+  useEffect(() => {
+    if (activeTab === 'arrived') {
+      setArrivedPage(1);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    setArrivedPage(1);
+  }, [arrivedWindow, arrivedType]);
 
   const renderEventSummary = (
     event: ShipEvent,
@@ -433,6 +486,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
           {ship && (
             <div className="text-[11px] text-slate-500 flex items-center gap-3 flex-wrap">
               <span>MMSI {ship.mmsi}</span>
+              <span>IMO {ship.imo || '-'}</span>
               <span>船籍 {ship.flag || '-'}</span>
               {ship.cnName && <span>中文名 {ship.cnName}</span>}
               <span>ETA {ship.eta?.replace('T', ' ') || '-'}</span>
@@ -557,6 +611,192 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
     </div>
   );
 
+  const arrivedCandidates = useMemo(() => {
+    const now = Date.now();
+    const windowMs = arrivedWindow * 60 * 60 * 1000;
+    const pool = new Map<string, Ship>();
+    const arrivedPool = arrivalShips ? arrivedShipsSource : ships;
+    arrivedPool.forEach((ship) => pool.set(ship.mmsi.toString(), ship));
+    if (useArrivedShipCache && shipCache) {
+      Object.values(shipCache).forEach((ship) => {
+        if (!pool.has(ship.mmsi.toString())) {
+          pool.set(ship.mmsi.toString(), ship);
+        }
+      });
+    }
+    return Array.from(pool.values())
+      .filter((ship) => {
+        const etaTs = parseEta(ship.eta);
+        if (!etaTs) return false;
+        return etaTs <= now && etaTs >= now - windowMs;
+      })
+      .sort((a, b) => {
+        const ta = parseEta(a.eta) ?? 0;
+        const tb = parseEta(b.eta) ?? 0;
+        return tb - ta;
+      });
+  }, [arrivalShips, arrivedShipsSource, ships, shipCache, arrivedWindow, useArrivedShipCache]);
+
+  const arrivedTypeOptions = useMemo(() => {
+    const set = new Set<string>();
+    arrivedCandidates.forEach((ship) => {
+      if (ship.type) set.add(ship.type);
+    });
+    return ['ALL', ...Array.from(set).sort((a, b) => a.localeCompare(b, 'zh-CN'))];
+  }, [arrivedCandidates]);
+
+  useEffect(() => {
+    if (arrivedType !== 'ALL' && !arrivedTypeOptions.includes(arrivedType)) {
+      setArrivedType('ALL');
+    }
+  }, [arrivedType, arrivedTypeOptions]);
+
+  const arrivedShips = useMemo(() => {
+    if (arrivedType === 'ALL') return arrivedCandidates;
+    return arrivedCandidates.filter((ship) => ship.type === arrivedType);
+  }, [arrivedCandidates, arrivedType]);
+
+  const arrivedTotalPages = Math.max(1, Math.ceil(arrivedShips.length / ARRIVED_PAGE_SIZE));
+  const arrivedCurrentPage = Math.min(arrivedPage, arrivedTotalPages);
+  const arrivedVisibleShips = arrivedShips.slice(
+    (arrivedCurrentPage - 1) * ARRIVED_PAGE_SIZE,
+    (arrivedCurrentPage - 1) * ARRIVED_PAGE_SIZE + ARRIVED_PAGE_SIZE
+  );
+
+  useEffect(() => {
+    if (arrivedPage > arrivedTotalPages) {
+      setArrivedPage(arrivedTotalPages);
+    }
+  }, [arrivedPage, arrivedTotalPages]);
+
+  const arrivedLayout = (
+    <div className="flex flex-col gap-4 flex-1">
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-white font-semibold text-lg">到港船只</h2>
+            <p className="text-xs text-slate-400 mt-1">仅显示 ETA 已到港且最近 {arrivedWindow} 小时内的船舶</p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap text-xs text-slate-400">
+            {[24, 48, 72].map((hours) => (
+              <button
+                key={hours}
+                onClick={() => setArrivedWindow(hours)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium border transition ${
+                  arrivedWindow === hours
+                    ? 'bg-blue-500/20 text-blue-100 border-blue-400/50'
+                    : 'text-slate-400 border-slate-700 hover:text-white'
+                }`}
+              >
+                近 {hours} 小时
+              </button>
+            ))}
+            <div className="flex items-center gap-2">
+              <span>船型</span>
+              <select
+                value={arrivedType}
+                onChange={(event) => setArrivedType(event.target.value)}
+                className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1.5 text-xs text-slate-200 focus:border-blue-400 focus:outline-none"
+              >
+                {arrivedTypeOptions.map((type) => (
+                  <option key={type} value={type}>
+                    {type === 'ALL' ? '全部' : type}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <span className="text-xs text-slate-400">共 {arrivedShips.length} 艘</span>
+          </div>
+        </div>
+      </div>
+      {arrivedShips.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/40 p-6 text-sm text-slate-400">
+          目前没有到港船（最近 {arrivedWindow} 小时）
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {arrivedVisibleShips.map((ship) => {
+            const isFollowed = followedSet?.has(ship.mmsi) ?? false;
+            return (
+              <div
+                key={ship.mmsi}
+                className="rounded-2xl border border-white/10 bg-gradient-to-br from-slate-900/70 via-slate-900/40 to-slate-900/20 px-4 py-4 backdrop-blur flex flex-col md:flex-row md:items-center gap-4"
+              >
+                <div className="flex-1 min-w-0 space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-base font-semibold text-white truncate">{ship.name}</p>
+                    {ship.cnName && <span className="text-xs text-slate-400 truncate">({ship.cnName})</span>}
+                    <span className="px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide bg-white/10 text-slate-100 border border-white/10">
+                      {ship.type || 'Unknown'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 font-mono">
+                    MMSI {ship.mmsi} • IMO {ship.imo || '-'} • 船籍 {ship.flag || '-'}
+                  </p>
+                  <div className="text-xs text-slate-400 flex flex-wrap gap-3">
+                    <span>出发港 {formatPortWithCountry(ship.lastPort)}</span>
+                    <span>目的地 {ship.dest || '-'}</span>
+                    <span>ETA {formatEtaBeijing(ship.eta)}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {onFollowShip && (
+                    <button
+                      onClick={() => onFollowShip(ship)}
+                      disabled={isFollowed}
+                      className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        isFollowed
+                          ? 'border-emerald-500/40 text-emerald-200 cursor-not-allowed'
+                          : 'border-slate-600 text-slate-200 hover:text-white hover:border-slate-400'
+                      }`}
+                    >
+                      {isFollowed ? '已关注' : '+关注'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => onSelectShip(ship)}
+                    className="px-3 py-1 rounded-full text-xs font-medium border border-white/20 text-white/70 hover:text-white hover:border-white/40 transition-colors"
+                  >
+                    详情
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {arrivedTotalPages > 1 && (
+            <div className="flex items-center justify-between text-xs text-slate-400">
+              <button
+                onClick={() => setArrivedPage((prev) => Math.max(1, prev - 1))}
+                disabled={arrivedCurrentPage === 1}
+                className={`px-3 py-1.5 rounded-full border ${
+                  arrivedCurrentPage === 1
+                    ? 'border-slate-800 text-slate-600 cursor-not-allowed'
+                    : 'border-slate-700 text-slate-200 hover:text-white hover:border-slate-500'
+                }`}
+              >
+                上一页
+              </button>
+              <span>
+                第 {arrivedCurrentPage} / {arrivedTotalPages} 页
+              </span>
+              <button
+                onClick={() => setArrivedPage((prev) => Math.min(arrivedTotalPages, prev + 1))}
+                disabled={arrivedCurrentPage === arrivedTotalPages}
+                className={`px-3 py-1.5 rounded-full border ${
+                  arrivedCurrentPage === arrivedTotalPages
+                    ? 'border-slate-800 text-slate-600 cursor-not-allowed'
+                    : 'border-slate-700 text-slate-200 hover:text-white hover:border-slate-500'
+                }`}
+              >
+                下一页
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   const eventsLayout = (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-lg overflow-hidden flex-1 flex flex-col">
       {loading && prioritizedEvents.length === 0 ? (
@@ -629,6 +869,16 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
                 }`}
               >
                 进港动态
+              </button>
+              <button
+                onClick={() => handleTabChange('arrived')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-full ${
+                  activeTab === 'arrived'
+                    ? 'bg-blue-500/20 text-blue-100 border border-blue-400/40'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                到港船只
               </button>
               <button
                 onClick={() => handleTabChange('events')}
@@ -706,7 +956,7 @@ export const RealtimeEventsPage: React.FC<RealtimeEventsPageProps> = ({
         </div>
       )}
 
-      {activeTab === 'arrivals' ? arrivalLayout : eventsLayout}
+      {activeTab === 'arrivals' ? arrivalLayout : activeTab === 'arrived' ? arrivedLayout : eventsLayout}
     </div>
   );
 };

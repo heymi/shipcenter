@@ -14,6 +14,7 @@ import {
   upsertFollowedShip,
   deleteFollowedShip,
   FollowedShipMeta,
+  fetchArrivedShips,
 } from './api';
 import { supabase } from './supabaseClient';
 import type { Session } from '@supabase/supabase-js';
@@ -58,6 +59,7 @@ const transformApiData = (apiShips: ShipxyShip[]): Ship[] => {
         SHIP_CN_NAME_OVERRIDES[(s.ship_name || '').toUpperCase()] ||
         SHIP_CN_NAME_MAP[(s.ship_name || '').toUpperCase()],
       mmsi: s.mmsi.toString(),
+      imo: s.imo !== undefined && s.imo !== null ? String(s.imo) : undefined,
       flag: String(s.ship_flag || 'Unknown'),
       type: getShipTypeName(s.ship_type), // Use helper to get readable name
       eta: etaString,
@@ -100,6 +102,15 @@ const AUTO_REFRESH_MS = (() => {
   return 5 * 60 * 1000; // 默认 5 分钟
 })();
 
+const ARRIVED_FETCH_HOURS = (() => {
+  const raw =
+    typeof import.meta !== 'undefined'
+      ? Number((import.meta as any)?.env?.VITE_ARRIVED_FETCH_HOURS)
+      : NaN;
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return 72;
+})();
+
 const getCookie = (name: string) => {
   if (typeof document === 'undefined') return null;
   const match = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()[\]\\/+^])/g, '\\$1') + '=([^;]*)'));
@@ -138,6 +149,7 @@ const App: React.FC = () => {
   const [currentView, setCurrentView] = useState('dashboard');
   const [allShips, setAllShips] = useState<Ship[]>([]);
   const [ships, setShips] = useState<Ship[]>([]);
+  const [arrivalShips, setArrivalShips] = useState<Ship[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -153,7 +165,7 @@ const App: React.FC = () => {
   >([]);
   const [followQueueBlocked, setFollowQueueBlocked] = useState(false);
   const [shareMode, setShareMode] = useState<'arrivals' | 'workspace' | null>(null);
-  const [eventsTab, setEventsTab] = useState<'events' | 'arrivals'>('arrivals');
+  const [eventsTab, setEventsTab] = useState<'events' | 'arrivals' | 'arrived'>('arrivals');
   const [shareMessage, setShareMessage] = useState<string | null>(null);
   const [shareToken, setShareToken] = useState<string | null>(null);
   const [shareVerified, setShareVerified] = useState(true);
@@ -182,6 +194,7 @@ const App: React.FC = () => {
     return parseEmailAllowlist(env || '');
   }, []);
   const shareMessageTimer = useRef<number | null>(null);
+  const [shipCache, setShipCache] = useState<Record<string, Ship>>({});
   const LOCAL_FOLLOW_CACHE = useMemo(() => {
     if (session?.user?.id) return `dockday_follow_cache_v1_${session.user.id}`;
     return 'dockday_follow_cache_v1_anonymous';
@@ -189,6 +202,10 @@ const App: React.FC = () => {
   const LOCAL_FOLLOW_QUEUE = useMemo(() => {
     if (session?.user?.id) return `dockday_follow_queue_v1_${session.user.id}`;
     return 'dockday_follow_queue_v1_anonymous';
+  }, [session?.user?.id]);
+  const LOCAL_SHIP_CACHE = useMemo(() => {
+    if (session?.user?.id) return `dockday_ship_cache_v1_${session.user.id}`;
+    return 'dockday_ship_cache_v1_anonymous';
   }, [session?.user?.id]);
   const localApiBase = useMemo(() => {
     if (API_CONFIG.LOCAL_API) return API_CONFIG.LOCAL_API;
@@ -230,6 +247,20 @@ const App: React.FC = () => {
     setFollowOpsQueue([]);
     setFollowQueueBlocked(false);
   }, [session?.user?.id, authReady, shareMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(LOCAL_SHIP_CACHE);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        setShipCache(parsed);
+      }
+    } catch (err) {
+      console.warn('Failed to load ship cache', err);
+    }
+  }, [LOCAL_SHIP_CACHE]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -865,6 +896,8 @@ const App: React.FC = () => {
 
         const res = await fetchETAShips('CNNJG', startTime, endTime);
 
+        const isMockResponse =
+          typeof res.msg === 'string' && res.msg.toLowerCase().includes('mock data');
         if (res.status === 0) {
           const fallbackShips = getFreshMockShips();
           const formattedShips = transformApiData(res.data || []);
@@ -872,8 +905,7 @@ const App: React.FC = () => {
           const foreignShips = filterForeignShips(finalShips);
           setAllShips(foreignShips);
           setShips(foreignShips);
-          setShipDataUpdatedAt(Date.now());
-          setNotice(formattedShips.length > 0 ? null : '接口无返回，展示示例数据');
+          setNotice(formattedShips.length > 0 && !isMockResponse ? null : '接口无返回，展示示例数据');
         } else {
           const fallbackShips = getFreshMockShips();
           setError(null);
@@ -881,7 +913,15 @@ const App: React.FC = () => {
           const foreignShips = filterForeignShips(fallbackShips);
           setAllShips(foreignShips);
           setShips(foreignShips);
-          setShipDataUpdatedAt(Date.now());
+        }
+        if (hasLocalApi) {
+          const arrivedPayload = await fetchArrivedShips(ARRIVED_FETCH_HOURS, 200, 'CNNJG');
+          if (arrivedPayload) {
+            const arrivedShips = transformApiData(arrivedPayload);
+            const foreignArrivals = filterForeignShips(arrivedShips);
+            setArrivalShips(foreignArrivals);
+            setShipDataUpdatedAt(Date.now());
+          }
         }
       } catch (err) {
         console.error(err);
@@ -891,13 +931,12 @@ const App: React.FC = () => {
         const foreignShips = filterForeignShips(fallbackShips);
         setAllShips(foreignShips);
         setShips(foreignShips);
-        setShipDataUpdatedAt(Date.now());
       } finally {
         if (!silent) setLoading(false);
         setRefreshing(false);
       }
     },
-    []
+    [hasLocalApi]
   );
 
   useEffect(() => {
@@ -946,6 +985,23 @@ const App: React.FC = () => {
       return changed ? next : prev;
     });
   }, [allShips, followedMmsiSet]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (allShips.length === 0) return;
+    setShipCache((prev) => {
+      const next = { ...prev };
+      allShips.forEach((ship) => {
+        next[ship.mmsi] = ship;
+      });
+      try {
+        window.localStorage.setItem(LOCAL_SHIP_CACHE, JSON.stringify(next));
+      } catch (err) {
+        console.warn('Failed to persist ship cache', err);
+      }
+      return next;
+    });
+  }, [allShips, LOCAL_SHIP_CACHE]);
 
   const handleFollowShip = useCallback(
     async (ship: Ship) => {
@@ -1151,6 +1207,8 @@ const App: React.FC = () => {
           <RealtimeEventsPage
             ships={ships}
             allShips={allShips}
+            arrivalShips={arrivalShips}
+            shipCache={shipCache}
             onSelectShip={
               shareMode === 'arrivals' ? handleShareSelectShip : (ship) => setActiveShip(ship)
             }

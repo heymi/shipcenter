@@ -31,11 +31,19 @@ interface WorkbenchPageProps {
 }
 
 const formatTimestamp = (ms: number) =>
-  new Date(ms).toLocaleString('zh-CN', { hour12: false });
+  new Date(ms).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
 
 const formatUpdateTime = (ts?: number | null) => {
   if (!ts) return '未同步';
-  return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+  return new Date(ts).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+};
+
+const formatBeijingDateTime = (value?: string) => {
+  if (!value) return '-';
+  const normalized = value.replace('T', ' ');
+  const date = new Date(`${normalized}+08:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
 };
 
 const formatMetric = (value?: number, suffix = '') => {
@@ -768,7 +776,7 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
                   )}
                 </p>
                 <p className="text-xs text-slate-500 mt-1 font-mono">
-                  MMSI {activeShip.mmsi} · 船籍 {activeShip.flag || '-'}
+                  MMSI {activeShip.mmsi} · IMO {activeShip.imo || '-'} · 船籍 {activeShip.flag || '-'}
                 </p>
               </div>
               <button
@@ -814,7 +822,7 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
             <p className="text-xs text-slate-400">目的地</p>
             <p className="font-semibold">{activeShip.dest || '南京港'}</p>
             <p className="text-xs text-slate-500">
-              上一港 {formatPortWithCountry(activeShip.lastPort)}
+              出发港 {formatPortWithCountry(activeShip.lastPort)}
             </p>
           </div>
           <div className="rounded-xl border border-slate-800 p-3 text-sm text-slate-200">
@@ -839,12 +847,12 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
                 </p>
               </div>
               <div>
-                <p className="text-[10px] text-slate-500">ETD</p>
-                <p className="text-sm text-white">{activeShip.etd?.replace('T', ' ') || '-'}</p>
+                <p className="text-[10px] text-slate-500">ETA</p>
+                <p className="text-sm text-white">{formatBeijingDateTime(activeShip.eta)}</p>
               </div>
               <div>
                 <p className="text-[10px] text-slate-500">AIS 更新时间</p>
-                <p className="text-sm text-white">{activeShip.lastTime || '-'}</p>
+                <p className="text-sm text-white">{formatBeijingDateTime(activeShip.lastTime)}</p>
               </div>
               <div>
                 <p className="text-[10px] text-slate-500">代理公司</p>
@@ -1229,7 +1237,8 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-500 font-mono">
-                      MMSI {ship.mmsi} · 船籍 {ship.flag || '-'} · ETA {ship.eta?.replace('T', ' ') || '-'}{' '}
+                      MMSI {ship.mmsi} · IMO {ship.imo || '-'} · 船籍 {ship.flag || '-'} · ETA{' '}
+                      {ship.eta?.replace('T', ' ') || '-'}{' '}
                       {etaLabel && `(${etaLabel})`}
                     </p>
                   </div>

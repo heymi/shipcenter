@@ -9,6 +9,7 @@ import {
   getShipEventsByMmsi,
   getFollowedShipMetaByMmsi,
   getShipAiAnalysis,
+  listArrivedShips,
   listShipConfirmedFields,
   upsertShipConfirmedField,
   deleteShipConfirmedField,
@@ -24,9 +25,18 @@ import {
   upsertShareLink,
   updateFollowedShipStatus,
 } from './db';
-import { listAiModels, runShipInference } from './ai';
+import { listAiModels, runShipInference, runShipPartiesInference, runShipPartiesExtractionV2 } from './ai';
 import { fetchPublicSources } from './publicSources';
 import { startFetchTask } from './fetchTask';
+import { aiOutputToCandidates, buildShipPartiesResponse, ShipPartiesInput } from './shipParties';
+import {
+  buildShipPartiesV2,
+  buildCandidatePool,
+  rolesNeedingAi,
+  ShipPartiesMode,
+  sanitizeAiExtraction,
+} from './shipPartiesV2';
+import { retrievePublicEvidence } from './shipPartiesRetrieval';
 import type { Request, Response, NextFunction } from 'express';
 import { requireAuth } from './auth';
 import { isMainlandFlag } from '../utils/ship';
@@ -43,14 +53,26 @@ const PORT_LOCAL_NOTES = (process.env.PORT_LOCAL_NOTES || '').trim();
 
 // 简单 CORS，便于本地前端（不同端口）访问
 const resolveCorsOrigin = (origin?: string) => {
-  const raw = process.env.CORS_ORIGIN || '*';
-  if (raw === '*' || !origin) return raw;
+  const raw = (process.env.CORS_ORIGIN || '*').trim();
+  const requestOrigin = (origin || '').trim();
+  if (!requestOrigin) return raw || '*';
+  if (raw === '*') return requestOrigin;
   const allowlist = raw
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
-  if (allowlist.length === 0) return '*';
-  return allowlist.includes(origin) ? origin : allowlist[0];
+  if (allowlist.length === 0) return requestOrigin;
+  const matches = (entry: string) => {
+    if (entry === '*') return true;
+    if (!entry.includes('*')) return entry === requestOrigin;
+    const pattern = entry
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*');
+    return new RegExp(`^${pattern}$`).test(requestOrigin);
+  };
+  if (allowlist.some(matches)) return requestOrigin;
+  if (process.env.NODE_ENV !== 'production') return requestOrigin;
+  return allowlist[0];
 };
 
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -77,6 +99,15 @@ const getQueryNumber = (value: unknown): number | undefined => {
   if (!raw) return undefined;
   const num = Number(raw);
   return Number.isFinite(num) ? num : undefined;
+};
+
+const parseJsonParam = <T>(raw?: string): T | null => {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
 };
 
 const filterForeignShips = (ships: any[]) =>
@@ -134,6 +165,191 @@ app.get('/health', (_req, res) => {
     missing_optional: missingOptional,
     time: new Date().toISOString(),
   });
+});
+
+app.get('/api/ship/parties', (req, res) => {
+  const imo = getQueryString(req.query.imo);
+  const mmsi = getQueryString(req.query.mmsi);
+  const name = getQueryString(req.query.name);
+  const callsign = getQueryString(req.query.callsign) || getQueryString(req.query.call_sign);
+  const aisRaw = getQueryString(req.query.ais_static) || getQueryString(req.query.aisStatic);
+  const externalRaw = getQueryString(req.query.external);
+  const forceAi = getQueryString(req.query.force_ai) === '1';
+  const version = getQueryString(req.query.v) || '2';
+  const rawMode = (getQueryString(req.query.mode) || 'aggressive').toLowerCase();
+  const mode: ShipPartiesMode =
+    rawMode === 'strict' || rawMode === 'aggressive' ? rawMode : 'balanced';
+  const aisStatic = aisRaw ? parseJsonParam<Record<string, unknown>>(aisRaw) : null;
+  const external = externalRaw ? parseJsonParam<unknown>(externalRaw) : null;
+
+  if (aisRaw && !aisStatic) {
+    return res.status(400).json({ status: -1, msg: 'ais_static 解析失败，请提供合法 JSON' });
+  }
+  if (externalRaw && !external) {
+    return res.status(400).json({ status: -1, msg: 'external 解析失败，请提供合法 JSON' });
+  }
+
+  if (!imo && !mmsi && !name && !callsign && !aisStatic && !external) {
+    return res.status(400).json({ status: -1, msg: '至少提供 IMO/MMSI/船名/呼号 或 AIS/外部数据' });
+  }
+
+  const input: ShipPartiesInput = {
+    imo,
+    mmsi,
+    name,
+    callsign,
+    aisStatic,
+    external: external as ShipPartiesInput['external'],
+  };
+
+  const ship = {
+    name,
+    mmsi,
+    imo,
+    callsign,
+  };
+
+  if (version === '1') {
+    const baseResponse = buildShipPartiesResponse(input);
+    const shouldRunAi =
+      !baseResponse.registeredOwner &&
+      !baseResponse.beneficialOwner &&
+      !baseResponse.operator &&
+      !baseResponse.manager;
+
+    if (!shouldRunAi && !forceAi) {
+      return res.json({ ...baseResponse, ai_status: 'skipped' });
+    }
+
+    return fetchPublicSources(ship, { maxSources: 4, maxPerSource: 1 })
+      .then(async (snippets) => {
+        if (!snippets.length) return { ...baseResponse, ai_status: 'not_requested' };
+        try {
+          const aiOutput = await runShipPartiesInference({
+            ship: { ...ship, aisStatic: aisStatic || null },
+            sources: snippets,
+          });
+          if (aiOutput?.parse_error) {
+            return { ...baseResponse, ai_status: 'failed' };
+          }
+          const aiCandidates = aiOutputToCandidates(aiOutput);
+          if (aiCandidates.length === 0) {
+            return { ...baseResponse, ai_status: 'ok' };
+          }
+          return { ...buildShipPartiesResponse(input, aiCandidates), ai_status: 'ok' };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (/Gemini API key missing/i.test(message)) {
+            return { ...baseResponse, ai_status: 'failed' };
+          }
+          console.warn('ship parties ai failed', err);
+          return { ...baseResponse, ai_status: 'failed' };
+        }
+      })
+      .then((payload) => res.json(payload));
+  }
+
+  const candidatePool = buildCandidatePool({
+    imo,
+    mmsi,
+    name,
+    callSign: callsign,
+    aisStatic,
+    external,
+  });
+  const missingRoles = rolesNeedingAi(candidatePool);
+
+  return retrievePublicEvidence({
+    imo,
+    mmsi,
+    name,
+    callSign: callsign,
+  })
+    .then(async (retrieval) => {
+      let aiStatus: 'not_requested' | 'skipped' | 'ok' | 'failed' = 'not_requested';
+      let aiExtraction: any = null;
+
+      const shouldRunAi = forceAi || missingRoles.length > 0;
+      if (!shouldRunAi) {
+        aiStatus = 'skipped';
+      } else if (retrieval.status === 'empty' && mode !== 'aggressive') {
+        aiStatus = 'not_requested';
+      } else {
+        try {
+          const aiOutput = await runShipPartiesExtractionV2({
+            identity: { imo, mmsi, name, callSign: callsign },
+            missingRoles,
+            snippets: retrieval.snippets.map((item) => ({
+              id: item.id,
+              source: item.source,
+              url: item.url,
+              text: item.text,
+            })),
+            mode,
+            allowNoEvidence: retrieval.status === 'empty' && mode === 'aggressive',
+          });
+          if (aiOutput?.parse_error) {
+            aiStatus = 'failed';
+          } else {
+            aiStatus = 'ok';
+            aiExtraction = sanitizeAiExtraction(aiOutput);
+          }
+        } catch (err) {
+          console.warn('ship parties v2 ai failed', err);
+          aiStatus = 'failed';
+        }
+      }
+
+      const response = buildShipPartiesV2({
+        input: {
+          imo,
+          mmsi,
+          name,
+          callSign: callsign,
+          aisStatic,
+          external,
+        },
+        retrieval,
+        mode,
+        aiExtraction,
+        aiStatus,
+      });
+      return res.json(response);
+    });
+
+});
+
+app.get('/api/ship/parties', (req, res) => {
+  const imo = getQueryString(req.query.imo);
+  const mmsi = getQueryString(req.query.mmsi);
+  const name = getQueryString(req.query.name);
+  const callsign = getQueryString(req.query.callsign);
+  const aisRaw = getQueryString(req.query.ais_static);
+  const externalRaw = getQueryString(req.query.external);
+
+  const aisStatic = parseJsonParam<Record<string, unknown>>(aisRaw || undefined);
+  if (aisRaw && !aisStatic) {
+    return res.status(400).json({ status: -1, msg: 'ais_static JSON 无法解析' });
+  }
+  const external = parseJsonParam<Record<string, unknown> | any[]>(externalRaw || undefined);
+  if (externalRaw && !external) {
+    return res.status(400).json({ status: -1, msg: 'external JSON 无法解析' });
+  }
+
+  if (!imo && !mmsi && !name && !callsign && !aisStatic && !external) {
+    return res.status(400).json({ status: -1, msg: '至少提供 IMO/MMSI/船名/呼号/ais_static/external 之一' });
+  }
+
+  const input: ShipPartiesInput = {
+    imo,
+    mmsi,
+    name,
+    callsign,
+    aisStatic,
+    external,
+  };
+
+  return res.json(buildShipPartiesResponse(input));
 });
 
 const respondWithSnapshot = async (res: express.Response, port: string) => {
@@ -206,6 +422,53 @@ app.get('/ship-events', async (req, res) => {
   } catch (err) {
     console.error('读取动态失败', err);
     res.status(500).json({ status: -1, msg: '读取动态失败' });
+  }
+});
+
+app.get('/arrived-ships', async (req, res) => {
+  try {
+    const port = (getQueryString(req.query.port) || DEFAULT_PORT_CODE).toUpperCase();
+    const hoursParam = getQueryNumber(req.query.hours);
+    const limitParam = getQueryNumber(req.query.limit);
+    const hours = Number.isFinite(hoursParam) ? (hoursParam as number) : 72;
+    const limitRaw = Number.isFinite(limitParam) ? (limitParam as number) : 200;
+    const limit = Math.max(1, Math.min(1000, limitRaw));
+    const since = Date.now() - hours * 3600 * 1000;
+    const rows = await listArrivedShips(port, since, limit);
+    const ships = rows
+      .filter((row) => !isMainlandFlag(row.ship_flag || ''))
+      .map((row) => {
+        if (row.data_json) {
+          try {
+            const parsed = JSON.parse(row.data_json);
+            if (parsed && parsed.mmsi) return parsed;
+          } catch (err) {
+            console.warn('arrived_ships parse failed', err);
+          }
+        }
+        return {
+          mmsi: Number(row.mmsi) || 0,
+          ship_name: row.ship_name || 'Unknown Ship',
+          ship_cnname: row.ship_cnname || undefined,
+          imo: 0,
+          dwt: 0,
+          ship_type: '',
+          length: 0,
+          width: 0,
+          draught: 0,
+          preport_cnname: row.last_port || '',
+          last_time: new Date(row.detected_at || Date.now()).toISOString(),
+          last_time_utc: Math.floor((row.detected_at || Date.now()) / 1000),
+          eta: row.eta || '',
+          eta_utc: row.eta_utc || Math.floor((row.arrived_at || Date.now()) / 1000),
+          dest: row.dest || '',
+          ship_flag: row.ship_flag || '',
+        };
+      });
+    res.json({ status: 0, msg: 'Arrived ships', total: ships.length, data: ships });
+  } catch (err) {
+    console.error('读取到港船只失败', err);
+    res.status(500).json({ status: -1, msg: '读取到港船只失败', total: 0, data: [] });
   }
 });
 

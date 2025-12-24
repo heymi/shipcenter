@@ -47,7 +47,7 @@ export const EVENT_ICON_META: Record<
   LAST_PORT_CHANGE: {
     icon: MapPin,
     className: 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30',
-    label: '上一港调整',
+    label: '出发港调整',
   },
   STALE_SIGNAL: {
     icon: AlertCircle,

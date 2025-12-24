@@ -13,6 +13,7 @@ import { API_CONFIG } from '../config';
 import { fetchETAShips } from '../api';
 import { RiskLevel, ShipxyShip } from '../types';
 import { getShipTypeName, isMainlandFlag } from '../utils/ship';
+import { formatPortWithCountry } from '../utils/port';
 import { evaluateRiskRules, getRiskLabel, getRiskBadgeClass } from '../utils/risk';
 import { formatSmartWeekdayLabel } from '../utils/date';
 
@@ -519,7 +520,7 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
                     </div>
                   </div>
                   <p className="text-[11px] text-slate-400 font-mono">
-                    MMSI {ship.mmsi} • 船籍 {ship.ship_flag || '-'}
+                    MMSI {ship.mmsi} • IMO {ship.imo || '-'} • 船籍 {ship.ship_flag || '-'}
                   </p>
                 </div>
               </div>
@@ -539,8 +540,10 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
                   </div>
                 </div>
                 <div className="rounded-2xl border border-white/10 px-3 py-2 bg-slate-900/50">
-                  <p className="text-[11px] text-slate-400">上一港</p>
-                  <p className="text-sm font-semibold text-white truncate">{ship.preport_cnname || '-'}</p>
+                  <p className="text-[11px] text-slate-400">出发港</p>
+                  <p className="text-sm font-semibold text-white truncate">
+                    {formatPortWithCountry(ship.preport_cnname)}
+                  </p>
                 </div>
               </div>
               <div className="flex items-end gap-3">
@@ -678,9 +681,11 @@ const PortModule: React.FC<DataQueryCenterProps> = ({ onFollowShip, isFollowed }
                   <p className="text-sm font-semibold text-white mt-1">{selectedShip.draught ? `${selectedShip.draught} m` : '-'}</p>
                 </div>
                 <div className="rounded-2xl border border-slate-800 p-4 bg-slate-900/60">
-                  <p className="text-xs text-slate-400">目的地 / 上一港</p>
+                  <p className="text-xs text-slate-400">目的地 / 出发港</p>
                   <p className="text-sm font-semibold text-white mt-1">{selectedShip.dest || '-'}</p>
-                  <p className="text-xs text-slate-500 mt-1">上一港 {selectedShip.preport_cnname || '-'}</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    出发港 {formatPortWithCountry(selectedShip.preport_cnname)}
+                  </p>
                 </div>
               </div>
 

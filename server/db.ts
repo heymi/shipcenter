@@ -38,6 +38,23 @@ type ShipEventRow = {
   detected_at: number;
 };
 
+type ArrivedShipRow = {
+  id?: number;
+  port_code: string;
+  mmsi: string;
+  ship_name?: string | null;
+  ship_cnname?: string | null;
+  ship_flag?: string | null;
+  eta?: string | null;
+  eta_utc: number;
+  arrived_at?: number | null;
+  detected_at: number;
+  last_port?: string | null;
+  dest?: string | null;
+  source?: string | null;
+  data_json?: string | null;
+};
+
 type ShipAiAnalysisRow = {
   id?: number;
   user_id: string;
@@ -131,6 +148,19 @@ export const getShipEvents = async (since: number, limit: number) => {
   return data ?? [];
 };
 
+export const listArrivedShips = async (portCode: string, since: number, limit: number) => {
+  const client = getClient();
+  const { data, error } = await client
+    .from('arrived_ships')
+    .select('*')
+    .eq('port_code', portCode)
+    .gte('arrived_at', since)
+    .order('arrived_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data ?? [];
+};
+
 export const getShipEventsInRange = async (start: number, end: number) => {
   const client = getClient();
   const { data, error } = await client
@@ -193,6 +223,15 @@ export const saveEvents = async (events: ShipEventRow[]) => {
   if (!events.length) return;
   const client = getClient();
   const { error } = await client.from('ship_events').insert(events);
+  if (error) throw error;
+};
+
+export const upsertArrivedShips = async (rows: ArrivedShipRow[]) => {
+  if (!rows.length) return;
+  const client = getClient();
+  const { error } = await client.from('arrived_ships').upsert(rows, {
+    onConflict: 'port_code,mmsi,eta_utc',
+  });
   if (error) throw error;
 };
 

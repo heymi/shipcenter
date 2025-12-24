@@ -418,7 +418,7 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-500 font-mono">
-                      MMSI {ship.mmsi} · 船籍 {ship.flag || '-'}
+                      MMSI {ship.mmsi} · IMO {ship.imo || '-'} · 船籍 {ship.flag || '-'}
                     </p>
                   </div>
                   <div className="ml-auto">
@@ -463,7 +463,7 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
                     )}
                   </div>
                   <div className="rounded-2xl border border-white/5 px-3 py-2 bg-white/5">
-                    <p className="text-[10px] text-slate-400">上一港</p>
+                    <p className="text-[10px] text-slate-400">出发港</p>
                     <p className="text-sm font-semibold text-white truncate">
                       {formatPortWithCountry(ship.lastPort)}
                     </p>
@@ -495,7 +495,7 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
                   </div>
                   {ship.cnName && <p className="text-xs text-slate-400 truncate">{ship.cnName}</p>}
                   <p className="text-[11px] text-slate-500 font-mono">
-                    MMSI {ship.mmsi} • 船籍 {ship.flag || '-'}
+                    MMSI {ship.mmsi} • IMO {ship.imo || '-'} • 船籍 {ship.flag || '-'}
                   </p>
                 </div>
               </div>
@@ -526,7 +526,7 @@ export const ArrivalDetailsPage: React.FC<ArrivalDetailsPageProps> = ({
                   </div>
                 </div>
                 <div className="rounded-2xl border border-white/5 px-3 py-2 bg-white/5">
-                  <p className="text-[11px] text-slate-400 mb-0.5">上一港</p>
+                  <p className="text-[11px] text-slate-400 mb-0.5">出发港</p>
                   <p className="text-sm font-semibold text-white truncate">
                     {formatPortWithCountry(ship.lastPort)}
                   </p>

@@ -265,6 +265,36 @@ export const fetchShipEvents = async (since?: number, limit?: number): Promise<S
   }
 };
 
+export const fetchArrivedShips = async (
+  hours?: number,
+  limit?: number,
+  portCode?: string
+): Promise<ShipxyShip[] | null> => {
+  const localApiBase = resolveLocalApi();
+  if (!localApiBase) {
+    console.warn('Local API not configured, arrived ships unavailable');
+    return null;
+  }
+  try {
+    const trimmedBase = localApiBase.endsWith('/') ? localApiBase.slice(0, -1) : localApiBase;
+    const url = new URL(`${trimmedBase}/arrived-ships`);
+    if (hours) url.searchParams.set('hours', String(hours));
+    if (limit) url.searchParams.set('limit', String(limit));
+    if (portCode) url.searchParams.set('port', portCode);
+    const response = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+    if (!response.ok) {
+      throw new Error(`Local arrived ships API error: ${response.status}`);
+    }
+    const payload = await response.json();
+    if (Array.isArray(payload)) return payload as ShipxyShip[];
+    if (Array.isArray(payload?.data)) return payload.data as ShipxyShip[];
+    return [];
+  } catch (err) {
+    console.warn('Failed to load arrived ships:', err);
+    return null;
+  }
+};
+
 export type FollowedShipMeta = {
   mmsi: string;
   berth?: string | null;
@@ -457,6 +487,119 @@ export const fetchSharedShipAiAnalysis = async (
     updated_at: payload?.updated_at ?? null,
     created_at: payload?.created_at ?? null,
   };
+};
+
+export type ShipPartiesCandidate = {
+  value: string;
+  confidence: 'low' | 'medium' | 'high';
+  evidence: Array<{
+    source: 'input' | 'external';
+    path: string;
+    note?: string;
+  }>;
+};
+
+export type ShipPartiesResponse = {
+  query: {
+    imo?: string;
+    mmsi?: string;
+    name?: string;
+    callsign?: string;
+  };
+  ai_status?: 'not_requested' | 'skipped' | 'ok' | 'failed';
+  registeredOwner: ShipPartiesCandidate | null;
+  beneficialOwner: ShipPartiesCandidate | null;
+  operator: ShipPartiesCandidate | null;
+  manager: ShipPartiesCandidate | null;
+  candidates: Partial<
+    Record<'registeredOwner' | 'beneficialOwner' | 'operator' | 'manager', ShipPartiesCandidate[]>
+  >;
+};
+
+export type ShipPartiesV2Evidence = {
+  source: 'ais_static' | 'external' | 'public' | 'ai';
+  path: string;
+  strength: 'strong' | 'medium' | 'weak' | 'none';
+  note?: string;
+};
+
+export type ShipPartiesV2Party = {
+  name: string;
+  id?: string;
+  since?: string;
+  updatedAt?: string;
+  status?: 'confirmed' | 'inferred_from_weak_evidence' | 'ai_inferred_no_evidence';
+  confidence?: 'low' | 'medium' | 'high';
+  source?: string;
+  evidence: ShipPartiesV2Evidence[];
+};
+
+export type ShipPartiesV2Candidate = {
+  name: string;
+  score: number;
+  confidence: 'low' | 'medium' | 'high';
+  evidence: ShipPartiesV2Evidence[];
+  conflictsWith?: string[];
+  status?: 'confirmed' | 'inferred_from_weak_evidence' | 'ai_inferred_no_evidence';
+};
+
+export type ShipPartiesV2Response = {
+  identity: {
+    imo?: string;
+    mmsi?: string;
+    name?: string;
+    callSign?: string;
+    flag?: string;
+    shipType?: string;
+  };
+  parties: Partial<
+    Record<
+      'registeredOwner' | 'beneficialOwner' | 'operator' | 'manager' | 'bareboatCharterer',
+      ShipPartiesV2Party | null
+    >
+  >;
+  candidates: Partial<
+    Record<
+      'registeredOwner' | 'beneficialOwner' | 'operator' | 'manager' | 'bareboatCharterer',
+      ShipPartiesV2Candidate[]
+    >
+  >;
+  public_evidence: {
+    status: 'ok' | 'failed' | 'empty';
+    snippets: Array<{ id: string; source: string; url: string; text: string; retrieved_at: number }>;
+  };
+  notes: string[];
+  errors: string[];
+  ai_status: 'not_requested' | 'skipped' | 'ok' | 'failed';
+  retrieval_status: 'ok' | 'failed' | 'empty';
+};
+
+export const fetchShipParties = async (params: {
+  imo?: string | null;
+  mmsi?: string | null;
+  name?: string | null;
+  callsign?: string | null;
+  aisStatic?: Record<string, unknown> | null;
+  external?: unknown;
+  forceAi?: boolean;
+  mode?: 'strict' | 'balanced' | 'aggressive';
+  version?: '1' | '2';
+}): Promise<ShipPartiesV2Response | ShipPartiesResponse> => {
+  const base = getLocalBase();
+  if (!base) throw new Error('Local API not configured');
+  const url = new URL(`${base}/api/ship/parties`);
+  if (params.imo) url.searchParams.set('imo', params.imo);
+  if (params.mmsi) url.searchParams.set('mmsi', params.mmsi);
+  if (params.name) url.searchParams.set('name', params.name);
+  if (params.callsign) url.searchParams.set('callsign', params.callsign);
+  if (params.aisStatic) url.searchParams.set('ais_static', JSON.stringify(params.aisStatic));
+  if (params.external) url.searchParams.set('external', JSON.stringify(params.external));
+  if (params.forceAi) url.searchParams.set('force_ai', '1');
+  if (params.mode) url.searchParams.set('mode', params.mode);
+  url.searchParams.set('v', params.version || '2');
+  const resp = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  if (!resp.ok) throw new Error(`ship-parties error ${resp.status}`);
+  return resp.json();
 };
 
 export const upsertFollowedShip = async (meta: FollowedShipMeta) => {
